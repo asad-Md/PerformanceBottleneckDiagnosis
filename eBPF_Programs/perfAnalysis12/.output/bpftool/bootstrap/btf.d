@@ -1,0 +1,21 @@
+/home/asad/Code/FYP/bpf-developer-tutorial/src/12-profile/.output/bpftool/bootstrap/btf.o: \
+ btf.c \
+ /home/asad/Code/FYP/bpf-developer-tutorial/src/third_party/bpftool/include/linux/err.h \
+ /home/asad/Code/FYP/bpf-developer-tutorial/src/third_party/bpftool/include/linux/types.h \
+ /home/asad/Code/FYP/bpf-developer-tutorial/src/third_party/bpftool/include/uapi/linux/btf.h \
+ /home/asad/Code/FYP/bpf-developer-tutorial/src/12-profile/.output/bpftool/bootstrap/libbpf/include/bpf/bpf.h \
+ /home/asad/Code/FYP/bpf-developer-tutorial/src/third_party/bpftool/include/uapi/linux/bpf.h \
+ /home/asad/Code/FYP/bpf-developer-tutorial/src/third_party/bpftool/include/uapi/linux/bpf_common.h \
+ /home/asad/Code/FYP/bpf-developer-tutorial/src/12-profile/.output/bpftool/bootstrap/libbpf/include/bpf/libbpf_common.h \
+ /home/asad/Code/FYP/bpf-developer-tutorial/src/12-profile/.output/bpftool/bootstrap/libbpf/include/bpf/libbpf_version.h \
+ /home/asad/Code/FYP/bpf-developer-tutorial/src/12-profile/.output/bpftool/bootstrap/libbpf/include/bpf/libbpf_legacy.h \
+ /home/asad/Code/FYP/bpf-developer-tutorial/src/12-profile/.output/bpftool/bootstrap/libbpf/include/bpf/btf.h \
+ /home/asad/Code/FYP/bpf-developer-tutorial/src/12-profile/.output/bpftool/bootstrap/libbpf/include/bpf/hashmap.h \
+ /home/asad/Code/FYP/bpf-developer-tutorial/src/12-profile/.output/bpftool/bootstrap/libbpf/include/bpf/libbpf.h \
+ json_writer.h \
+ /home/asad/Code/FYP/bpf-developer-tutorial/src/third_party/bpftool/include/linux/compiler.h \
+ /home/asad/Code/FYP/bpf-developer-tutorial/src/third_party/bpftool/include/linux/compiler_types.h \
+ /home/asad/Code/FYP/bpf-developer-tutorial/src/third_party/bpftool/include/linux/compiler-gcc.h \
+ main.h \
+ /home/asad/Code/FYP/bpf-developer-tutorial/src/third_party/bpftool/include/linux/kernel.h \
+ /home/asad/Code/FYP/bpf-developer-tutorial/src/third_party/bpftool/include/linux/build_bug.h
