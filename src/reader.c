@@ -32,7 +32,6 @@
 #define TASK_COMM_LEN 16
 
 // ── map types — must match perf_monitor.bpf.c ─────────────────────────────────
-
 struct agg_key
 {
     uint32_t pid;
@@ -159,7 +158,7 @@ static int read_session_meta(uint64_t *start_ns, uint64_t *end_ns)
         fprintf(stderr, "[reader] WARNING: end_ns=0 in meta — pinner may not have stopped cleanly\n");
         // use current time as fallback
         struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
+        clock_gettime(CLOCK_MONOTONIC, &ts);
         *end_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
     }
 
@@ -294,7 +293,9 @@ int main(int argc, char **argv)
     // ── read session timestamps ───────────────────────────────────────────────
     uint64_t session_start_ns = 0, session_end_ns = 0;
     read_session_meta(&session_start_ns, &session_end_ns);
-
+    // fprintf(stderr, "[reader] meta: start_ns=%llu end_ns=%llu\n",
+    //         (unsigned long long)session_start_ns,
+    //         (unsigned long long)session_end_ns);
     // compute trim window in nanoseconds
     uint64_t trim_start_ns = session_start_ns + (uint64_t)skip_start * 1000000000ULL;
     uint64_t trim_end_ns = session_end_ns - (uint64_t)skip_end * 1000000000ULL;
@@ -449,6 +450,7 @@ int main(int argc, char **argv)
         // This filters out:
         //   - processes that only appeared during warmup (first skip_start s)
         //   - processes that only appeared during teardown (last skip_end s)
+        
         if (session_start_ns > 0 && (skip_start > 0 || skip_end > 0))
         {
             uint64_t last_seen = 0;
@@ -460,9 +462,16 @@ int main(int argc, char **argv)
                 last_seen = scv->last_seen_ns;
             if (lv && lv->last_seen_ns > last_seen)
                 last_seen = lv->last_seen_ns;
-
-            if (last_seen > 0 &&
-                (last_seen < trim_start_ns || last_seen > trim_end_ns))
+            // debug — print first 5 entries
+            // if (k < 5)
+            // {
+            //     fprintf(stderr, "[debug] k=%d last_seen=%llu trim_start=%llu trim_end=%llu\n",
+            //             k,
+            //             (unsigned long long)last_seen,
+            //             (unsigned long long)trim_start_ns,
+            //             (unsigned long long)trim_end_ns);
+            // }
+            if (last_seen > 0 && (last_seen < trim_start_ns))
             {
                 trimmed++;
                 continue;
