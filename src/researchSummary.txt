@@ -1,0 +1,34 @@
+Research Summary
+Phase 1: Real-Time Collection Issues
+
+The first attempt involved recording data constantly while the system was running. However, the process of saving this data to files created its own workload. This "observer effect" made every test look the same because the recording software was the main cause of the system's stress.
+Phase 2: Snapshot Collection with eBPF
+
+The system was rebuilt to record data silently. Using eBPF map pinning, the researchers allowed the Linux kernel to track performance metrics internally without needing an active program to save them to a disk in real-time. A "reader" program simply collected the final totals once the workload finished. This eliminated the interference seen in Phase 1.
+Phase 3: Workload Categories
+
+The team tested five types of system stress to see if the data showed unique patterns:
+
+    Normal: Idle, light web browsing, and moderate multitasking.
+
+    CPU: Heavy mathematical calculations.
+
+    Memory: Rapidly allocating and moving data in RAM.
+
+    I/O: Intense file reading and writing.
+
+    Locking: Forcing programs to compete for the same internal resources.
+
+Phase 4: Findings and Limitations
+
+The analysis revealed several challenges:
+
+    Data Sparsity: Most background processes didn't produce enough activity to be useful for the AI model.
+
+    Signal Dilution: In memory tests, it was hard to distinguish the "stress" program from regular system tools like the web browser.
+
+    Artificial Stress: Most stress tests didn't actually make the computer feel slow to the user. The AI was learning to identify specific programs rather than actual performance degradation.
+
+Conclusion and Next Steps
+
+While the technical infrastructure works, the data needs to reflect real-world "bottlenecks." The next phase will focus on measuring how a "victim" application (like a lagging browser) performs when another program is hogging resources, rather than just measuring the program causing the stress.

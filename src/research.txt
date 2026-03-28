@@ -1,0 +1,75 @@
+# Research Work Summary
+
+## Phase 1: Time-Series Approach (Abandoned)
+
+The initial approach to data collection was time-series based. The plan was to continuously collect performance metrics at fixed intervals while running various workloads, storing each interval as a timestamped row in a CSV file. eBPF programs were attached to kernel tracepoints covering CPU scheduling, memory allocation, syscall latency, and lock contention. A userspace Python collector would read the eBPF maps periodically and write aggregated rows to CSV in real time.
+
+However, upon analyzing the collected data, a fundamental problem emerged: all workload labels showed suspiciously similar metric patterns. The root cause was the overhead introduced by the collection pipeline itself. Despite eBPF being chosen specifically for its low-overhead kernel instrumentation, the act of continuously reading kernel maps and writing to CSV from userspace introduced measurable scheduler and I/O interference. This overhead was present uniformly across all workload types, masking the actual differences between labels. Using eBPF to reduce overhead while simultaneously polling and writing from userspace was self-defeating — the collection mechanism was distorting the very signals it was trying to capture. The time-series approach was abandoned entirely.
+
+---
+
+## Phase 2: Snapshot-Based Collection via Pinned eBPF Maps
+
+The architecture was redesigned around a fundamentally different principle: separate the observation phase from the reading phase completely. Instead of continuously reading and writing during the workload, the eBPF programs would silently accumulate metrics in kernel maps throughout the entire session, and userspace would only read once at the very end after the workload finished. This eliminated collection overhead from contaminating the measurements.
+
+This was achieved through **eBPF map pinning**. When an eBPF program is loaded, its maps normally exist only as long as the loading process is alive — they are tied to the file descriptor held by that process. Map pinning solves this by creating a persistent reference to the kernel map object on the BPF virtual filesystem, mounted at `/sys/fs/bpf/`. Specifically, after loading the BPF object with `bpf_object__load()`, each map is pinned using `bpf_map__pin(map, "/sys/fs/bpf/map_name")`. This creates a filesystem handle at that path that holds a reference to the in-kernel map independently of any process. The eBPF programs continue running and updating the maps in kernel space, but no userspace process needs to remain active or do any reading. A separate reader process can then open the pinned map at any later time using `bpf_obj_get("/sys/fs/bpf/map_name")`, which returns a file descriptor to the same kernel map object. The reader iterates over all entries using `bpf_map_get_next_key()` and `bpf_map_lookup_elem()`, drains the data, writes it to CSV, and then removes the pins with `unlink()`.
+
+The pipeline was split into two binaries: `pinner` and `reader`. The `pinner` binary loads the BPF object, pins all four maps (`sched_map`, `mem_map`, `syscall_map`, `lock_map`), attaches all probe programs to their respective kernel tracepoints and kprobes, writes a session metadata file to `/tmp/perf_session.meta` containing the session start timestamp, and then simply waits. It consumes zero CPU during the wait — all metric accumulation happens entirely in kernel space as the BPF programs fire on kernel events. When the user presses Ctrl+C, the pinner records the session end timestamp in the metadata file and exits, leaving the pinned maps intact in the BPF filesystem.
+
+The `reader` binary is then invoked manually after the workload ends. It reads the session start and end timestamps from the metadata file and uses them to implement **warmup and teardown trimming**: the first 5 seconds and last 2 seconds of the session are excluded from the CSV output. This is done by checking the `last_seen_ns` field of each map entry — a timestamp written by the BPF program each time it updates that entry — against the valid window `[start_ns + 5s, end_ns - 2s]`. Entries whose most recent activity falls outside this window are dropped. This removes the startup noise of stress-ng spawning threads and allocating initial memory, and the teardown noise of threads exiting and memory being freed, leaving only the steady-state bottleneck behavior. An important implementation detail discovered during development was that `bpf_ktime_get_ns()` in the BPF programs uses `CLOCK_MONOTONIC`, which pauses during system suspend, while the pinner initially used `CLOCK_REALTIME` for its timestamps. This clock mismatch caused all entries to be trimmed since the timestamps were in completely different reference frames. The fix was to use `CLOCK_MONOTONIC` consistently in both pinner and reader. A further complication arose when the laptop suspended during a collection session — since `CLOCK_MONOTONIC` pauses during suspend, any session that crosses a suspend boundary produces corrupted timestamps and must be discarded.
+
+Each map uses `(pid, cpu)` as the aggregation key. All four maps accumulate counters for the entire session duration, so each entry represents the cumulative activity of one process on one CPU core across the whole session. The reader merges all four maps by matching on `(pid, cpu)` keys and writes one CSV row per unique key, with zeros for map categories where that process had no activity.
+
+---
+
+## Phase 3: Data Collection
+
+### Normal Behavior
+
+Three categories of normal system behavior were collected. `normal_idle` sessions were recorded with all applications closed — only a bare terminal running — to capture the quietest possible baseline of background kernel threads, daemons, and system services. The laptop was left untouched for 90 seconds per session with several repetitions to build up sufficient row counts. `normal_light` sessions were collected while actively scrolling YouTube Shorts in a browser for approximately 90 seconds, representing realistic light interactive use involving browser rendering, video decode, network I/O, and GPU compositing. `normal_mixed` sessions were collected while running `stress-ng --cpu 4 --vm 1 --vm-bytes 20%` — a mild combined load that sits between idle and stressed, representing background compilation or similar moderate activity. These three normal categories together formed the baseline against which bottleneck labels would be compared.
+
+### CPU-Bound Workloads
+
+Five CPU-bound sessions were collected using different stress-ng stressors designed to oversubscribe the CPU. The 4780HS processor has 8 cores and 16 logical threads, so workloads were configured to spawn 32 threads to guarantee 2× oversubscription. Stressors used included pure compute loops (`--cpu 32`), matrix multiplication (`--matrix 16`, `--cpu-method matrixprod`), FFT computation (`--cpu-method fft`), and process fork pressure (`--fork 32`). The fork workload in particular produced an interesting mixed signature — it generated high page faults and lock contentions alongside high CPU usage, because each fork operation requires kernel locks during process table manipulation and page table setup. This was kept as valid `cpu_bound` data since fork pressure is a legitimate CPU bottleneck pattern, and the model needs to learn such nuanced signatures.
+
+### Memory-Bound Workloads
+
+Five memory-bound sessions were collected targeting different aspects of memory pressure. Stressors included large working set random access (`--vm 6 --vm-bytes 90% --vm-method rand-set`), cache thrashing (`--cache 8 --cache-enable-all`), mmap pressure (`--mmap 8 --mmap-bytes 1G`), zero-one page fault patterns (`--vm 4 --vm-bytes 90% --vm-method zero-one`), and malloc/free churn (`--malloc 8`). A significant challenge with memory-bound collection was that the browser and desktop environment remained running during these sessions, and tools like `systemd-oomd`, `gnome-shell`, and `kworker` threads all showed elevated `total_alloc_bytes` comparable to the stress-ng workers themselves. This meant that memory signal was severely diluted across the many background process rows in the dataset.
+
+### I/O-Bound Workloads
+
+Five I/O-bound sessions were collected using stress-ng I/O stressors, since fio required additional packages. Stressors included dentry cache pressure (`--dentry 8`), pipe I/O throughput (`--pipe 16`), HDD stress (`--hdd 4`), mixed I/O patterns (`--iomix 8`), and async I/O (`--aio 8`). The browser was left running in the background during these sessions since the I/O signal from the stressors was expected to be strong enough to stand above normal browser activity.
+
+### Lock Contention Workloads
+
+Five contention sessions were collected targeting different locking primitives. Stressors used were kernel mutex contention (`--mutex 16`), futex contention (`--futex 16`), semaphore contention (`--sem 16`), atomic operations (`--atomic 16`), and reader-writer semaphore contention (`--rw-sem 16`). The `--spinlock` and `--rwlock` options were not available in the installed version of stress-ng. Notably, during the `--lockbus` session the system became genuinely unresponsive — single mouse clicks took several seconds and terminal switching was noticeably sluggish — making it the only session that represented a true user-observable bottleneck rather than synthetic background stress.
+
+---
+
+## Phase 4: Analysis and Identified Limitations
+
+### Sparsity Problem
+
+Initial analysis of the collected data revealed severe sparsity. The dataset contained approximately 100,000 rows per-`(pid, cpu)` entry across all sessions, but only 14–20% of rows had non-zero values for key memory and I/O features. The remaining 80%+ were background system processes captured by the scheduler probe but with no corresponding memory, syscall, or lock activity — they appeared in `sched_map` but were absent from the other three maps. A sparsity filter was applied to remove rows where all activity columns were simultaneously zero, and a 99th percentile cap was applied per feature to prevent extreme outliers (such as the fork session's lock contention spike) from collapsing all other variation to zero in plots and model training.
+
+### Signal Dilution in Memory-Bound Sessions
+
+Even after filtering, the memory-bound label remained problematic. Analysis of `total_alloc_bytes` by process name showed that background processes including `systemd-oomd`, `gnome-shell`, `zen` browser, and kernel worker threads all showed allocation values comparable to or exceeding the actual stress-ng worker processes in some sessions. This meant the memory bottleneck signal was not distinguishable from normal system behavior at the per-row level. Various aggregation strategies were attempted — summing per session, taking the maximum per session — but the max aggregation produced identical values across all labels because the same background process (likely `systemd-oomd`) was always present with a fixed allocation footprint.
+
+### Session-Level Aggregation
+
+Recognizing that per-row classification was not viable due to sparsity, the approach was shifted to session-level aggregation: all rows belonging to the same session (sharing the same `timestamp_s`) were summed or averaged into a single feature vector, producing one row per pinner session. This is semantically correct for the stated goal — classifying the system's overall bottleneck state rather than individual process behavior. However, this reduced the dataset to only 25 total session rows across all labels (5–6 per bottleneck type, 1–2 per normal type), which is far too few for meaningful machine learning.
+
+### Classification Results
+
+A Random Forest classifier trained on the 25 session rows achieved 100% accuracy on training data and a 5-fold cross-validation macro F1 of 0.551 ± 0.282, with individual fold scores ranging from 0.222 to 1.00. This extreme variance directly reflects the tiny dataset size — with only 1–2 samples per label per fold, results are effectively random. The feature importance analysis showed `avg_runq_latency_us` dominating at 55% importance when trained on per-row data, indicating the model was essentially a single-feature threshold classifier rather than learning a genuine multi-dimensional bottleneck signature.
+
+### Fundamental Label Validity Problem
+
+The most significant finding emerged from observational experience during collection: with the exception of the `--lockbus` session, none of the stress-ng workloads produced a genuinely user-observable bottleneck. The system remained responsive — applications opened normally, terminals switched instantly, and mouse clicks were immediate — throughout all other stress sessions. This reveals a fundamental mismatch between the training data and the stated goal. The model is being trained to distinguish different stress-ng workload *types*, not to identify actual system bottlenecks as experienced by users. A model trained on this data would learn signatures of artificial benchmark processes rather than the degradation patterns of real applications under resource starvation. True bottleneck data should be captured from the perspective of victim processes — real applications experiencing degraded performance because they are starved of CPU, memory, I/O bandwidth, or lock access — rather than from the stressor processes causing the load.
+
+---
+
+## Current Status and Next Steps
+
+The pipeline infrastructure is complete and validated: the BPF program, pinner, reader, and analysis notebook all function correctly. The data collection methodology using pinned maps with warmup trimming is sound. The remaining challenges are dataset quality and volume. The next phase requires a fundamental rethinking of what constitutes a bottleneck label — shifting from stressor-process sessions to victim-process sessions where real applications are observably degraded — and collecting sufficient session-level data (target: 50+ sessions per label) to train a generalizable classifier. Feature engineering at the session level, particularly ratios and derived metrics that capture system-wide resource contention rather than individual process activity, will also be explored before model training.
