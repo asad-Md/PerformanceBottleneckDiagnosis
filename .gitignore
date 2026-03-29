@@ -1,4 +1,8 @@
-venv/
+# Virtual environments
+**/tf_gpu_env/
+**/venv/
+**/.venv/
+
+# Python
 __pycache__/
 *.pyc
-.ipynb_checkpoints/
