@@ -1,0 +1,11 @@
+Suggestions of what to do next:
+    normalization and synthesizing - balancing dataset labels
+    xgboost l2- bottleneck  
+            l3- type of bottleneck
+
+    also try    random forest, lightgbm, xgboost with hyperparameter tuning
+                lstm to predict next row of util
+    
+    jiffy to ts (timestamp) function to convert timestamp col to hour min s  - when using for lstm
+
+    make diff csvs to record data for parallel training and avoiding large size in single file.
