@@ -6,3 +6,7 @@
 # Python
 __pycache__/
 *.pyc
+
+testers
+testers/*
+!testers/.gitkeep
