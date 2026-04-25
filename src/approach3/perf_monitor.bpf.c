@@ -28,12 +28,16 @@
  *
  * Build:
  *   clang -O2 -g -target bpf \
- *    -D__TARGET_ARCH_x86 \
- *    -I/usr/include/bpf \
- *    -c pinner.bpf.c -o pinner.bpf.o
+ *         -D__TARGET_ARCH_x86 \
+ *         -I/usr/include/bpf \
+ *         -c perf_monitor.bpf.c -o perf_monitor.bpf.o
+ * clang -O2 -g -target bpf -D__TARGET_ARCH_x86 -I/usr/include/bpf -c perf_monitor.bpf.c -o perf_monitor.bpf.o
  */
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wmissing-declarations"
 #include "vmlinux.h"
+#pragma clang diagnostic pop
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
@@ -243,14 +247,12 @@ struct
  * Helper: get or create a zeroed sched_val for (pid, cpu)
  * ══════════════════════════════════════════════════════════════════════════════ */
 static __always_inline struct sched_val *
-get_or_create_sched(struct agg_key *k, const char *comm)
+get_or_create_sched(struct agg_key *k)
 {
     struct sched_val *v = bpf_map_lookup_elem(&sched_map, k);
     if (!v)
     {
         struct sched_val zero = {};
-        if (comm)
-            __builtin_memcpy(zero.comm, comm, TASK_COMM_LEN);
         bpf_map_update_elem(&sched_map, k, &zero, BPF_NOEXIST);
         v = bpf_map_lookup_elem(&sched_map, k);
     }
@@ -360,12 +362,14 @@ int handle_switch(struct trace_event_raw_sched_switch *ctx)
     if (next_pid != 0)
     {
         struct agg_key nk = {.pid = next_pid, .cpu = cpu};
-        struct sched_val *nv = get_or_create_sched(&nk, ctx->next_comm);
+        struct sched_val *nv = get_or_create_sched(&nk); // <--- Updated call
         if (nv)
         {
             nv->ctx_switches++;
             nv->last_update_ns = now;
-            __builtin_memcpy(nv->comm, ctx->next_comm, TASK_COMM_LEN);
+
+            // SAFELY read the process name from the context
+            bpf_probe_read_kernel_str(nv->comm, TASK_COMM_LEN, ctx->next_comm);
 
             /* wakeup→run latency */
             struct wakeup_entry *we = bpf_map_lookup_elem(&wakeup_scratch, &next_pid);
@@ -393,10 +397,13 @@ int handle_switch(struct trace_event_raw_sched_switch *ctx)
     if (prev_pid != 0)
     {
         struct agg_key pk = {.pid = prev_pid, .cpu = cpu};
-        struct sched_val *pv = get_or_create_sched(&pk, ctx->prev_comm);
+        struct sched_val *pv = get_or_create_sched(&pk); // <--- Updated call
         if (pv)
         {
             pv->last_update_ns = now;
+
+            // SAFELY read the process name from the context
+            bpf_probe_read_kernel_str(pv->comm, TASK_COMM_LEN, ctx->prev_comm);
 
             /* on-CPU runtime */
             struct oncpu_entry *oe = bpf_map_lookup_elem(&oncpu_scratch, &prev_pid);
@@ -426,18 +433,16 @@ int handle_migrate(struct trace_event_raw_sched_migrate_task *ctx)
     __u64 now = bpf_ktime_get_ns();
 
     struct agg_key k = {.pid = pid, .cpu = cpu};
-    struct sched_val *v = bpf_map_lookup_elem(&sched_map, &k);
-    if (!v)
-    {
-        struct sched_val zero = {};
-        __builtin_memcpy(zero.comm, ctx->comm, TASK_COMM_LEN);
-        bpf_map_update_elem(&sched_map, &k, &zero, BPF_NOEXIST);
-        v = bpf_map_lookup_elem(&sched_map, &k);
-    }
+    struct sched_val *v = get_or_create_sched(&k);
     if (v)
     {
         v->cpu_migrations++;
         v->last_update_ns = now;
+
+        /* * We intentionally skip reading the 'comm' string here.
+         * The handle_switch tracepoint already reliably captures
+         * the process name when it actually runs!
+         */
     }
     return 0;
 }
@@ -449,7 +454,7 @@ int handle_migrate(struct trace_event_raw_sched_migrate_task *ctx)
  * handle_page_fault_kernel: kernel-space faults (rare; indicates pressure)
  * ══════════════════════════════════════════════════════════════════════════════ */
 SEC("tp/exceptions/page_fault_user")
-int handle_page_fault_user(struct trace_event_raw_x86_exceptions *ctx)
+int handle_page_fault_user(void *ctx)
 {
     __u64 now = bpf_ktime_get_ns();
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
@@ -472,7 +477,7 @@ int handle_page_fault_user(struct trace_event_raw_x86_exceptions *ctx)
 }
 
 SEC("tp/exceptions/page_fault_kernel")
-int handle_page_fault_kernel(struct trace_event_raw_x86_exceptions *ctx)
+int handle_page_fault_kernel(void *ctx)
 {
     __u64 now = bpf_ktime_get_ns();
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
@@ -497,13 +502,14 @@ int handle_page_fault_kernel(struct trace_event_raw_x86_exceptions *ctx)
 /* ══════════════════════════════════════════════════════════════════════════════
  * kmem_cache_alloc / kmem_cache_free — kernel allocator pressure
  * ══════════════════════════════════════════════════════════════════════════════ */
-SEC("tp/kmem/kmalloc")
-int handle_kmalloc(struct trace_event_raw_kmem_alloc *ctx)
+SEC("tp_btf/kmalloc")
+int BPF_PROG(handle_kmalloc, unsigned long call_site, const void *ptr,
+             size_t bytes_req, size_t bytes_alloc, gfp_t gfp_flags)
 {
     __u64 now = bpf_ktime_get_ns();
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
     __u32 cpu = bpf_get_smp_processor_id();
-    __u64 size = ctx->bytes_alloc;
+    __u64 size = bytes_alloc;
 
     struct agg_key k = {.pid = pid, .cpu = cpu};
     struct mem_val *v = bpf_map_lookup_elem(&mem_map, &k);
@@ -525,7 +531,7 @@ int handle_kmalloc(struct trace_event_raw_kmem_alloc *ctx)
 }
 
 SEC("tp/kmem/kfree")
-int handle_kfree(struct trace_event_raw_kmem_free *ctx)
+int handle_kfree(void *ctx)
 {
     __u64 now = bpf_ktime_get_ns();
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
@@ -724,47 +730,37 @@ struct
     __type(value, struct lock_scratch_entry);
 } lock_scratch SEC(".maps");
 
-SEC("tp/lock/lock_acquire")
-int handle_lock_acquire(struct trace_event_raw_lock *ctx)
+/* ══════════════════════════════════════════════════════════════════════════════
+ * Mutex / rwsem contention via Kprobes (Works without CONFIG_LOCKDEP)
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+/* 1. Mutexes */
+SEC("kprobe/mutex_lock")
+int BPF_KPROBE(handle_mutex_lock_enter)
 {
-    if (!ctx->trylock && ctx->read != 0)
-    {
-        /* rwsem read */
-        __u32 pid = bpf_get_current_pid_tgid() >> 32;
-        struct lock_scratch_entry le = {
-            .try_ns = bpf_ktime_get_ns(),
-            .is_read = 1,
-        };
-        bpf_map_update_elem(&lock_scratch, &pid, &le, BPF_ANY);
-    }
-    else if (!ctx->trylock)
-    {
-        /* mutex / spinlock */
-        __u32 pid = bpf_get_current_pid_tgid() >> 32;
-        struct lock_scratch_entry le = {
-            .try_ns = bpf_ktime_get_ns(),
-            .is_read = 0,
-        };
-        bpf_map_update_elem(&lock_scratch, &pid, &le, BPF_ANY);
-    }
+    __u32 pid = bpf_get_current_pid_tgid() >> 32;
+    struct lock_scratch_entry le = {
+        .try_ns = bpf_ktime_get_ns(),
+        .is_read = 0, /* 0 = mutex */
+    };
+    bpf_map_update_elem(&lock_scratch, &pid, &le, BPF_ANY);
     return 0;
 }
 
-SEC("tp/lock/lock_acquired")
-int handle_lock_acquired(struct trace_event_raw_lock *ctx)
+SEC("kretprobe/mutex_lock")
+int BPF_KRETPROBE(handle_mutex_lock_exit)
 {
     __u64 now = bpf_ktime_get_ns();
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
     __u32 cpu = bpf_get_smp_processor_id();
 
     struct lock_scratch_entry *le = bpf_map_lookup_elem(&lock_scratch, &pid);
-    if (!le || le->try_ns == 0)
+    if (!le || le->try_ns == 0 || le->is_read != 0)
         return 0;
+
     __u64 wait = (now > le->try_ns) ? now - le->try_ns : 0;
-    __u8 kind = le->is_read;
     bpf_map_delete_elem(&lock_scratch, &pid);
 
-    /* Only record if there was actual wait (contention) */
     if (wait == 0)
         return 0;
 
@@ -776,29 +772,61 @@ int handle_lock_acquired(struct trace_event_raw_lock *ctx)
         bpf_map_update_elem(&lock_map, &k, &zero, BPF_NOEXIST);
         v = bpf_map_lookup_elem(&lock_map, &k);
     }
-    if (!v)
-        return 0;
-
-    if (kind == 0)
-    { /* mutex */
+    if (v)
+    {
         v->mutex_contentions++;
         v->mutex_wait_sum_ns += wait;
         if (wait > v->mutex_wait_max_ns)
             v->mutex_wait_max_ns = wait;
+        v->last_update_ns = now;
     }
-    else if (kind == 1)
-    { /* rwsem read */
+    return 0;
+}
+
+/* 2. Read-Write Semaphores (Readers) */
+SEC("kprobe/down_read")
+int BPF_KPROBE(handle_down_read_enter)
+{
+    __u32 pid = bpf_get_current_pid_tgid() >> 32;
+    struct lock_scratch_entry le = {
+        .try_ns = bpf_ktime_get_ns(),
+        .is_read = 1, /* 1 = rwsem read */
+    };
+    bpf_map_update_elem(&lock_scratch, &pid, &le, BPF_ANY);
+    return 0;
+}
+
+SEC("kretprobe/down_read")
+int BPF_KRETPROBE(handle_down_read_exit)
+{
+    __u64 now = bpf_ktime_get_ns();
+    __u32 pid = bpf_get_current_pid_tgid() >> 32;
+    __u32 cpu = bpf_get_smp_processor_id();
+
+    struct lock_scratch_entry *le = bpf_map_lookup_elem(&lock_scratch, &pid);
+    if (!le || le->try_ns == 0 || le->is_read != 1)
+        return 0;
+
+    __u64 wait = (now > le->try_ns) ? now - le->try_ns : 0;
+    bpf_map_delete_elem(&lock_scratch, &pid);
+
+    if (wait == 0)
+        return 0;
+
+    struct agg_key k = {.pid = pid, .cpu = cpu};
+    struct lock_val *v = bpf_map_lookup_elem(&lock_map, &k);
+    if (!v)
+    {
+        struct lock_val zero = {};
+        bpf_map_update_elem(&lock_map, &k, &zero, BPF_NOEXIST);
+        v = bpf_map_lookup_elem(&lock_map, &k);
+    }
+    if (v)
+    {
         v->rwsem_read_contentions++;
         v->rwsem_read_wait_sum_ns += wait;
+        v->last_update_ns = now;
     }
-    else
-    { /* rwsem write */
-        v->rwsem_write_contentions++;
-        v->rwsem_write_wait_sum_ns += wait;
-        if (wait > v->rwsem_write_wait_max_ns)
-            v->rwsem_write_wait_max_ns = wait;
-    }
-    v->last_update_ns = now;
     return 0;
 }
 
