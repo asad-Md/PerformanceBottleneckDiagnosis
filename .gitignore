@@ -8,3 +8,4 @@ __pycache__/
 *.pyc
 
 **/testers/**
+src/approach3/testers/
