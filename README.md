@@ -9,6 +9,8 @@ gcc -O2 -o reader reader.c -lbpf -lelf -lz
 sudo ./pinner --obj perf_monitor.bpf.o
 sudo ./reader --label cpu_bound --skip-start 5 --skip-end 2
 
+sudo ./reader --label cpu_bound --append
+
 
 
 AUTODATA.SH 

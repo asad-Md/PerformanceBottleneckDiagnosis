@@ -2,15 +2,19 @@
 
 set -e
 
+# ===== PATH SETUP =====
+ROOT_DIR="$(pwd)"
+TESTERS_DIR="$ROOT_DIR/testers"
+
 # ===== CONFIG =====
 CURRENT_LABEL=""
 PINNER_PID=""
 INTERRUPTED=false
 
-DURATION=300   # longer = more contention
+DURATION=300
 
-PINNER_CMD="sudo ./pinner --obj perf_monitor.bpf.o"
-READER_CMD="sudo ./reader"
+PINNER_CMD="sudo $ROOT_DIR/pinner --obj $ROOT_DIR/perf_monitor.bpf.o"
+READER_CMD="sudo $ROOT_DIR/reader"
 
 # ===== SUDO KEEP-ALIVE =====
 echo "[+] Requesting sudo..."
@@ -50,23 +54,29 @@ trap 'kill $SUDO_KEEPALIVE_PID 2>/dev/null || true' EXIT
 # ===== WORKLOAD FUNCTIONS =====
 
 run_kernel_build() {
-  if [ ! -d "linux" ]; then
-    git clone https://github.com/torvalds/linux.git
+  if [ ! -d "$TESTERS_DIR/linux" ]; then
+    echo "[!] Skipping kernel build (linux repo not found in testers/)"
+    return
   fi
-  cd linux
+
+  echo "[+] Running kernel build..."
+  cd "$TESTERS_DIR/linux"
   make -j$(nproc)*2 &
-  cd ..
+  cd "$ROOT_DIR"
 }
 
 run_sysbench() {
+  echo "[+] Running sysbench..."
   sysbench cpu --threads=$(nproc)*2 run &
 }
 
 run_blender() {
+  echo "[+] Running blender..."
   blender -b -noaudio -f 1 &
 }
 
 run_docker_chaos() {
+  echo "[+] Running docker chaos..."
   for i in {1..4}; do
     docker run -d ubuntu bash -c "while true; do sha1sum /dev/zero; done"
   done
@@ -79,7 +89,7 @@ stop_docker() {
 # ===== MAIN =====
 
 SESSIONS=(
-  "real_compile"
+  "compile_only"
   "compile_sysbench"
   "compile_blender"
   "full_system"
@@ -92,9 +102,8 @@ for label in "${SESSIONS[@]}"; do
   echo "[SESSION] $label"
   echo "======================================="
 
-  # start workloads
   case $label in
-    real_compile)
+    compile_only)
       run_kernel_build
       ;;
     compile_sysbench)
@@ -113,15 +122,15 @@ for label in "${SESSIONS[@]}"; do
       ;;
   esac
 
-  # wait 2 sec → start pinner
+  # start pinner after 2 sec
   sleep 2
   $PINNER_CMD &
   PINNER_PID=$!
 
-  # run for duration
+  # run duration
   sleep $DURATION
 
-  # stop everything
+  # stop workloads
   pkill -INT make 2>/dev/null || true
   pkill -INT sysbench 2>/dev/null || true
   pkill -INT blender 2>/dev/null || true
@@ -132,7 +141,7 @@ for label in "${SESSIONS[@]}"; do
   wait $PINNER_PID 2>/dev/null || true
   PINNER_PID=""
 
-  # read data
+  # read
   $READER_CMD --label "$label" --append
 
   echo "[✓] Completed: $label"
