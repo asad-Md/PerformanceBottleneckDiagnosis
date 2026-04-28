@@ -319,350 +319,126 @@ INTRODUCTION
 1.1  INTRODUCTION
 ------------------------------------------------------------------------
 
-The emergence of multicore processor architectures has fundamentally altered
-the landscape of modern computing. Contemporary processors — from server-grade
-chips with tens of cores to consumer-grade systems such as the AMD Ryzen 7
-4800HS with 8 physical cores and 16 hardware threads — derive their
-computational advantage from the parallel execution of multiple independent
-threads of control. Operating system schedulers exploit this parallelism through
-preemptive multitasking, assigning runnable threads to available CPU cores on
-timescales of microseconds. However, this very parallelism introduces a class
-of performance pathologies that are qualitatively different from those
-encountered in single-core systems: resource contention, runqueue saturation,
-memory bandwidth exhaustion, lock starvation, and cache thrashing.
+The emergence of multicore processor architectures has fundamentally altered the landscape of modern computing. Contemporary processors — from server-grade chips with tens of cores to consumer-grade systems such as the AMD Ryzen 7 4800HS with 8 physical cores and 16 hardware threads — derive their computational advantage from the parallel execution of multiple independent threads of control. Operating system schedulers exploit this parallelism through preemptive multitasking, assigning runnable threads to available CPU cores on timescales of microseconds. However, this very parallelism introduces a class of performance pathologies that are qualitatively different from those encountered in single-core systems: resource contention, runqueue saturation, memory bandwidth exhaustion, lock starvation, and cache thrashing.
 
-When a multicore system operates under conditions of resource saturation, the
-degradation is rarely uniform. A CPU-bound workload spawning more runnable
-threads than there are available cores causes all co-scheduled processes on
-those cores to experience elevated runqueue wait time — the interval between
-when a process becomes runnable (wakeup) and when it is actually dispatched
-onto a CPU. This latency, accumulating across thousands of context switches per
-second, manifests to end users as sluggish response times, increased tail
-latency in networked services, and in severe cases, system-wide unresponsiveness.
-Similarly, a memory-intensive workload can saturate physical memory bandwidth
-and trigger the kernel's page reclaim subsystem, causing processes that are
-not themselves memory-intensive to suffer increased minor and major fault counts
-and elevated system call latency. Lock contention presents yet another failure
-mode: when many threads compete for the same mutex or reader-writer semaphore,
-contending threads are placed on a wait queue and descheduled, consuming
-neither CPU nor making forward progress, yet appearing to the scheduler as
-resource consumers.
+When a multicore system operates under conditions of resource saturation, the degradation is rarely uniform. A CPU-bound workload spawning more runnable threads than there are available cores causes all co-scheduled processes on those cores to experience elevated runqueue wait time — the interval between when a process becomes runnable (wakeup) and when it is actually dispatched onto a CPU. This latency, accumulating across thousands of context switches per second, manifests to end users as sluggish response times, increased tail latency in networked services, and in severe cases, system-wide unresponsiveness. Similarly, a memory-intensive workload can saturate physical memory bandwidth and trigger the kernel's page reclaim subsystem, causing processes that are not themselves memory-intensive to suffer increased minor and major fault counts and elevated system call latency. Lock contention presents yet another failure mode: when many threads compete for the same mutex or reader-writer semaphore, contending threads are placed on a wait queue and descheduled, consuming neither CPU nor making forward progress, yet appearing to the scheduler as resource consumers.
 
-A central challenge in diagnosing such pathologies is observability: the
-ability to measure the system's internal state accurately, at sufficient
-granularity, and without the act of measurement itself distorting the system
-being observed. Traditional performance monitoring approaches face a fundamental
-tension in this regard. Userspace polling tools — perf stat, top, vmstat,
-sar, iostat — operate by periodically reading performance counters or /proc
-entries from userspace. This polling loop introduces scheduler pressure, cache
-pollution, and I/O overhead at the very moment that precise, undistorted
-measurements are required. The problem is not merely theoretical: in
-resource-constrained systems, the monitoring tool competes with the workload
-for the same CPU cores, memory bandwidth, and kernel locks it is attempting to
-measure. The result is a measurement artefact that can mask or misattribute the
-actual bottleneck.
+A central challenge in diagnosing such pathologies is observability: the ability to measure the system's internal state accurately, at sufficient granularity, and without the act of measurement itself distorting the system being observed. Traditional performance monitoring approaches face a fundamental tension in this regard. Userspace polling tools — perf stat, top, vmstat, sar, iostat — operate by periodically reading performance counters or /proc entries from userspace. This polling loop introduces scheduler pressure, cache pollution, and I/O overhead at the very moment that precise, undistorted measurements are required. The problem is not merely theoretical: in resource-constrained systems, the monitoring tool competes with the workload for the same CPU cores, memory bandwidth, and kernel locks it is attempting to measure. The result is a measurement artefact that can mask or misattribute the actual bottleneck.
 
-Hardware Performance Monitoring Units (PMUs), accessible via the perf_event
-subsystem, provide low-level cycle-accurate counters for events such as cache
-misses, branch mispredictions, and instructions retired. While PMU-based
-profiling offers sub-microsecond temporal resolution, it operates at the
-hardware instruction level and cannot directly expose the operating system
-scheduling behaviour — specifically, the runqueue latency experienced by
-individual processes — that is the most direct measure of CPU resource
-contention from the perspective of a scheduled task. Furthermore, PMU events
-are CPU-local: they capture what is happening on the core that is running the
-monitoring software, not the global system state.
+Hardware Performance Monitoring Units (PMUs), accessible via the perf_event subsystem, provide low-level cycle-accurate counters for events such as cache misses, branch mispredictions, and instructions retired. While PMU-based profiling offers sub-microsecond temporal resolution, it operates at the hardware instruction level and cannot directly expose the operating system scheduling behaviour — specifically, the runqueue latency experienced by individual processes — that is the most direct measure of CPU resource contention from the perspective of a scheduled task. Furthermore, PMU events are CPU-local: they capture what is happening on the core that is running the monitoring software, not the global system state.
 
-The Linux kernel tracing infrastructure addresses some of these limitations
-by providing hooks into scheduler, memory, and I/O subsystems via kernel
-tracepoints and kprobes. The extended Berkeley Packet Filter (eBPF) framework,
-introduced in mainline Linux kernel 3.18 and substantially extended through
-kernel versions 4.x and 5.x, offers a safe, verifier-checked mechanism for
-attaching small programs to these hooks that execute directly in kernel context.
-Because eBPF programs run in the kernel — at the exact moment a scheduling
-event, page fault, system call, or lock acquisition occurs — they can capture
-event timestamps and update per-process counters with nanosecond precision,
-without any round-trip to userspace. When combined with a deferred, single-shot
-data extraction model using pinned BPF maps, the overhead introduced by the
-instrumentation layer can be reduced to the irreducible cost of the BPF program
-execution itself, which is typically measured in tens of nanoseconds per event.
+The Linux kernel tracing infrastructure addresses some of these limitations by providing hooks into scheduler, memory, and I/O subsystems via kernel tracepoints and kprobes. The extended Berkeley Packet Filter (eBPF) framework, introduced in mainline Linux kernel 3.18 and substantially extended through kernel versions 4.x and 5.x, offers a safe, verifier-checked mechanism for attaching small programs to these hooks that execute directly in kernel context. Because eBPF programs run in the kernel — at the exact moment a scheduling event, page fault, system call, or lock acquisition occurs — they can capture event timestamps and update per-process counters with nanosecond precision, without any round-trip to userspace. When combined with a deferred, single-shot data extraction model using pinned BPF maps, the overhead introduced by the instrumentation layer can be reduced to the irreducible cost of the BPF program execution itself, which is typically measured in tens of nanoseconds per event.
 
-This project exploits these properties of eBPF to build a low-overhead,
-kernel-grounded performance data collection system, and couples it with a
-supervised machine learning pipeline to perform automated, per-process
-bottleneck severity classification. The result is a system capable of
-diagnosing which individual processes on a multicore machine are experiencing
-significant resource starvation, and to what degree, based entirely on
-objectively measured kernel-level scheduling signals.
+This project exploits these properties of eBPF to build a low-overhead, kernel-grounded performance data collection system, and couples it with a supervised machine learning pipeline to perform automated, per-process bottleneck severity classification. The result is a system capable of diagnosing which individual processes on a multicore machine are experiencing significant resource starvation, and to what degree, based entirely on objectively measured kernel-level scheduling signals.
 
 
 ------------------------------------------------------------------------
 1.2  PROBLEM STATEMENT
 ------------------------------------------------------------------------
 
-Contemporary multicore systems lack a production-viable, low-overhead mechanism
-for performing per-process root-cause bottleneck diagnosis. The following
-specific deficiencies in existing approaches motivate this work:
+Contemporary multicore systems lack a production-viable, low-overhead mechanism for performing per-process root-cause bottleneck diagnosis. The following specific deficiencies in existing approaches motivate this work:
 
-(i)  HIGH MEASUREMENT OVERHEAD IN POLLING-BASED TOOLS
+(i) HIGH MEASUREMENT OVERHEAD IN POLLING-BASED TOOLS
 
-Tools such as top, perf stat, vmstat, and sar obtain performance data by
-periodically reading /proc/stat, /proc/[pid]/stat, and hardware performance
-counters from userspace. This periodic polling introduces measurable overhead
-in the form of context switches (from the monitored process to the monitoring
-tool and back), cache evictions (the monitoring tool's working set displaces
-the monitored application's data in shared L3 cache), and I/O system calls
-(reading /proc entries triggers VFS operations). In systems where the
-bottleneck is already causing CPU saturation, the monitoring tool's scheduler
-demand exacerbates the very condition being measured. This feedback loop
-between the observer and the observed contaminates the collected data and can
-lead to incorrect diagnosis.
+Tools such as top, perf stat, vmstat, and sar obtain performance data by periodically reading /proc/stat, /proc/[pid]/stat, and hardware performance counters from userspace. This periodic polling introduces measurable overhead in the form of context switches (from the monitored process to the monitoring tool and back), cache evictions (the monitoring tool's working set displaces the monitored application's data in shared L3 cache), and I/O system calls (reading /proc entries triggers VFS operations). In systems where the bottleneck is already causing CPU saturation, the monitoring tool's scheduler demand exacerbates the very condition being measured. This feedback loop between the observer and the observed contaminates the collected data and can lead to incorrect diagnosis.
 
-(ii)  ABSENCE OF ROOT-CAUSE ATTRIBUTION AT PROCESS GRANULARITY
+(ii) ABSENCE OF ROOT-CAUSE ATTRIBUTION AT PROCESS GRANULARITY
 
-Existing tools report system-wide or cgroup-level aggregates. A report of
-"80% CPU utilisation" from top does not identify which of the hundreds of
-scheduled processes are experiencing runqueue delay, nor does it distinguish
-between CPU-bound stress (high involuntary preemptions), I/O-bound stress
-(high voluntary yields), and lock contention (futex wait accumulation). The
-operator is left to manually correlate multiple tool outputs — perf, strace,
-ltrace, lsof — none of which share a unified data model or common timestamp
-reference.
+Existing tools report system-wide or cgroup-level aggregates. A report of "80% CPU utilisation" from top does not identify which of the hundreds of scheduled processes are experiencing runqueue delay, nor does it distinguish between CPU-bound stress (high involuntary preemptions), I/O-bound stress (high voluntary yields), and lock contention (futex wait accumulation). The operator is left to manually correlate multiple tool outputs — perf, strace, ltrace, lsof — none of which share a unified data model or common timestamp reference.
 
-(iii)  SEMANTIC MISMATCH: STRESSOR LABELS VERSUS VICTIM PROCESS SIGNALS
+(iii) SEMANTIC MISMATCH: STRESSOR LABELS VERSUS VICTIM PROCESS SIGNALS
 
-Approaches that label training data by the type of synthetic workload applied
-(e.g., labelling all data collected during a CPU stress benchmark as
-"cpu_bottleneck") conflate the identity of the stressor process with the
-experience of victim processes. A process that is mildly CPU-stressed appears
-identical to the monitoring system as one that is severely starved, because the
-label is attached to the session, not derived from the process's own measured
-latency. This produces a training dataset where the label does not correspond
-to any directly measurable signal in the feature vector, forcing the model to
-learn spurious correlations rather than genuine bottleneck signatures.
+Approaches that label training data by the type of synthetic workload applied (e.g., labelling all data collected during a CPU stress benchmark as "cpu_bottleneck") conflate the identity of the stressor process with the experience of victim processes. A process that is mildly CPU-stressed appears identical to the monitoring system as one that is severely starved, because the label is attached to the session, not derived from the process's own measured latency. This produces a training dataset where the label does not correspond to any directly measurable signal in the feature vector, forcing the model to learn spurious correlations rather than genuine bottleneck signatures.
 
-(iv)  CLOCK REFERENCE INCONSISTENCY IN HYBRID KERNEL/USERSPACE SYSTEMS
+(iv) CLOCK REFERENCE INCONSISTENCY IN HYBRID KERNEL/USERSPACE SYSTEMS
 
-BPF programs record timestamps using bpf_ktime_get_ns(), which reads
-CLOCK_MONOTONIC — a clock that pauses during system suspend. Userspace
-collection frameworks that use CLOCK_REALTIME or gettimeofday() for session
-boundaries introduce a clock reference mismatch that corrupts warmup and
-teardown trimming logic, causing valid data to be discarded or noisy
-startup data to be included in the training set.
+BPF programs record timestamps using bpf_ktime_get_ns(), which reads CLOCK_MONOTONIC — a clock that pauses during system suspend. Userspace collection frameworks that use CLOCK_REALTIME or gettimeofday() for session boundaries introduce a clock reference mismatch that corrupts warmup and teardown trimming logic, causing valid data to be discarded or noisy startup data to be included in the training set.
 
-(v)  DATASET SPARSITY AND SIGNAL DILUTION AT SESSION LEVEL
+(v) DATASET SPARSITY AND SIGNAL DILUTION AT SESSION LEVEL
 
-When multiple bottleneck types are present simultaneously on a many-process
-system, aggregating all process data to a single session-level feature vector
-(as required by session-level classifiers) causes severe signal dilution.
-Background processes — kernel threads, system daemons, D-Bus services —
-generate feature values that obscure the signal of the small number of
-victim processes actually experiencing resource starvation. Session-level
-accuracy on sparse datasets (25–50 sessions) is statistically unreliable,
-with cross-validation F1 scores showing variance exceeding 0.25 across folds.
+When multiple bottleneck types are present simultaneously on a many-process system, aggregating all process data to a single session-level feature vector (as required by session-level classifiers) causes severe signal dilution. Background processes — kernel threads, system daemons, D-Bus services — generate feature values that obscure the signal of the small number of victim processes actually experiencing resource starvation. Session-level accuracy on sparse datasets (25–50 sessions) is statistically unreliable, with cross-validation F1 scores showing variance exceeding 0.25 across folds.
 
-These five deficiencies collectively define the problem that this project
-addresses: the need for a monitoring architecture that captures per-process
-kernel-level scheduling signals with negligible overhead, derives bottleneck
-labels objectively from those signals rather than from external workload
-descriptions, and trains a machine learning model that can generalise to
-unseen processes and workloads.
+These five deficiencies collectively define the problem that this project addresses: the need for a monitoring architecture that captures per-process kernel-level scheduling signals with negligible overhead, derives bottleneck labels objectively from those signals rather than from external workload descriptions, and trains a machine learning model that can generalise to unseen processes and workloads.
 
-
-------------------------------------------------------------------------
-1.3  OBJECTIVES
-------------------------------------------------------------------------
+------------------------------------------------------------------------ 1.3 OBJECTIVES ------------------------------------------------------------------------
 
 The following objectives define the measurable outcomes of this project:
 
-O1. Design and implement a Linux kernel instrumentation layer using eBPF
-    tracepoints and kprobes that captures, at per-(pid, cpu) granularity,
-    the following classes of performance signals without any continuous
-    userspace polling:
-      - Runqueue wait latency (wakeup-to-run interval, nanosecond resolution)
-      - Voluntary and involuntary context switch counts
-      - CPU migration counts and per-CPU runqueue depth ratio
-      - Minor and major page fault counts and kernel allocator pressure
-      - System call latency for read, write, mmap, futex, epoll_wait, ppoll
-      - Mutex and reader-writer semaphore contention wait times
+O1. Design and implement a Linux kernel instrumentation layer using eBPF tracepoints and kprobes that captures, at per-(pid, cpu) granularity, the following classes of performance signals without any continuous userspace polling: - Runqueue wait latency (wakeup-to-run interval, nanosecond resolution) - Voluntary and involuntary context switch counts - CPU migration counts and per-CPU runqueue depth ratio - Minor and major page fault counts and kernel allocator pressure - System call latency for read, write, mmap, futex, epoll_wait, ppoll - Mutex and reader-writer semaphore contention wait times
 
-O2. Implement a decoupled, map-pinning-based data pipeline in which the eBPF
-    instrumentation layer accumulates metrics entirely in kernel space for the
-    duration of a collection session, with userspace interaction limited to a
-    single atomic map drain at session end, thereby eliminating the observer
-    effect of continuous polling.
+O2. Implement a decoupled, map-pinning-based data pipeline in which the eBPF instrumentation layer accumulates metrics entirely in kernel space for the duration of a collection session, with userspace interaction limited to a single atomic map drain at session end, thereby eliminating the observer effect of continuous polling.
 
-O3. Define a kernel-verifiable, process-level 4-class bottleneck severity
-    label schema based solely on the measured avg_stall_ns (average runqueue
-    latency per context switch) of each (pid, cpu) pair, independent of any
-    externally applied session label:
-      - Class 0 (Normal):  avg_stall_ns < 2,000,000 ns
-      - Class 1 (Low):     avg_stall_ns < 10,000,000 ns
-      - Class 2 (Medium):  avg_stall_ns < 50,000,000 ns
-      - Class 3 (High):    avg_stall_ns >= 50,000,000 ns
+O3. Define a kernel-verifiable, process-level 4-class bottleneck severity label schema based solely on the measured avg_stall_ns (average runqueue latency per context switch) of each (pid, cpu) pair, independent of any externally applied session label: - Class 0 (Normal): avg_stall_ns < 2,000,000 ns - Class 1 (Low): avg_stall_ns < 10,000,000 ns - Class 2 (Medium): avg_stall_ns < 50,000,000 ns - Class 3 (High): avg_stall_ns >= 50,000,000 ns
 
-O4. Build an automated data collection pipeline using shell scripts
-    (autoData.sh series) that orchestrates pinner, stress-ng, and reader
-    across a defined matrix of workload types (CPU, memory, I/O, lock
-    contention, mixed, and idle baselines) to produce a training dataset
-    of no fewer than 50,000 cleaned process-level rows.
+O4. Build an automated data collection pipeline using shell scripts (autoData.sh series) that orchestrates pinner, stress-ng, and reader across a defined matrix of workload types (CPU, memory, I/O, lock contention, mixed, and idle baselines) to produce a training dataset of no fewer than 50,000 cleaned process-level rows.
 
-O5. Implement a machine learning classification pipeline in Python (Jupyter
-    notebooks) covering: data cleaning, engineered ratio features, log-
-    scaling of skewed distributions, GroupShuffleSplit session-aware
-    train/test partitioning to prevent data leakage, and training of
-    Random Forest and XGBoost 4-class classifiers with class_weight=
-    'balanced' to handle natural class imbalance.
+O5. Implement a machine learning classification pipeline in Python (Jupyter notebooks) covering: data cleaning, engineered ratio features, log- scaling of skewed distributions, GroupShuffleSplit session-aware train/test partitioning to prevent data leakage, and training of Random Forest and XGBoost 4-class classifiers with class_weight= 'balanced' to handle natural class imbalance.
 
-O6. Validate the trained classifiers using per-class precision, recall, and
-    F1-score, and confirm via feature importance analysis that avg_stall_ns
-    and involuntary_ratio dominate model decisions, providing a sanity check
-    that the model has learned genuine kernel scheduling signals rather than
-    dataset artefacts.
+O6. Validate the trained classifiers using per-class precision, recall, and F1-score, and confirm via feature importance analysis that avg_stall_ns and involuntary_ratio dominate model decisions, providing a sanity check that the model has learned genuine kernel scheduling signals rather than dataset artefacts.
 
-O7. Quantify the runtime overhead of the eBPF instrumentation layer relative
-    to the unmonitored baseline to confirm that collection overhead does not
-    meaningfully alter the workload characteristics being measured.
+O7. Quantify the runtime overhead of the eBPF instrumentation layer relative to the unmonitored baseline to confirm that collection overhead does not meaningfully alter the workload characteristics being measured.
 
+------------------------------------------------------------------------ 1.4 SCOPE ------------------------------------------------------------------------
 
-------------------------------------------------------------------------
-1.4  SCOPE
-------------------------------------------------------------------------
-
-1.4.1  WITHIN SCOPE
+1.4.1 WITHIN SCOPE
 
 The following are explicitly within the scope of this project:
 
-(a) Kernel-space instrumentation using eBPF for the Linux kernel (kernel
-    version 5.15 and above) targeting the x86-64 instruction set architecture,
-    compiled with Clang against vmlinux BTF for CO-RE (Compile Once, Run
-    Everywhere) portability.
+(a) Kernel-space instrumentation using eBPF for the Linux kernel (kernel version 5.15 and above) targeting the x86-64 instruction set architecture, compiled with Clang against vmlinux BTF for CO-RE (Compile Once, Run Everywhere) portability.
 
-(b) Per-process, per-CPU granularity data collection covering four subsystems:
-    CPU scheduling (sched_map), memory pressure (mem_map), system call
-    latency (syscall_map), and lock contention (lock_map).
+(b) Per-process, per-CPU granularity data collection covering four subsystems: CPU scheduling (sched_map), memory pressure (mem_map), system call latency (syscall_map), and lock contention (lock_map).
 
-(c) A complete data collection automation pipeline for generating multi-session
-    training datasets across five bottleneck categories: CPU saturation, memory
-    pressure, I/O saturation, lock contention, and mixed workloads.
+(c) A complete data collection automation pipeline for generating multi-session training datasets across five bottleneck categories: CPU saturation, memory pressure, I/O saturation, lock contention, and mixed workloads.
 
-(d) Supervised multi-class classification using Random Forest and XGBoost on
-    the collected dataset, with session-aware cross-validation to evaluate
-    generalisation.
+(d) Supervised multi-class classification using Random Forest and XGBoost on the collected dataset, with session-aware cross-validation to evaluate generalisation.
 
-(e) Documentation of three successive design approaches, including the failure
-    modes of Approaches 1 and 2, as evidence of iterative engineering and
-    informed design evolution.
+(e) Documentation of three successive design approaches, including the failure modes of Approaches 1 and 2, as evidence of iterative engineering and informed design evolution.
 
-(f) Feature importance analysis and class distribution analysis as model
-    validation tools, confirming that classification decisions are grounded in
-    the correct kernel signals.
+(f) Feature importance analysis and class distribution analysis as model validation tools, confirming that classification decisions are grounded in the correct kernel signals.
 
-1.4.2  OUTSIDE SCOPE
+1.4.2 OUTSIDE SCOPE
 
 The following are explicitly excluded from this project:
 
-(a) Real-time, online inference: the current pipeline performs offline batch
-    classification. A real-time inference daemon that continuously classifies
-    running processes is considered future work.
+(a) Real-time, online inference: the current pipeline performs offline batch classification. A real-time inference daemon that continuously classifies running processes is considered future work.
 
-(b) Kernel modifications: all instrumentation is implemented in userspace-
-    loaded eBPF programs. No kernel patches, kernel modules, or out-of-tree
-    kernel code are required or produced.
+(b) Kernel modifications: all instrumentation is implemented in userspace- loaded eBPF programs. No kernel patches, kernel modules, or out-of-tree kernel code are required or produced.
 
-(c) Network performance monitoring: the project focuses exclusively on
-    scheduler, memory, system call, and lock subsystems. Network interface
-    statistics, TCP retransmit events, and socket buffer latency are not
-    instrumented.
+(c) Network performance monitoring: the project focuses exclusively on scheduler, memory, system call, and lock subsystems. Network interface statistics, TCP retransmit events, and socket buffer latency are not instrumented.
 
-(d) GPU and accelerator monitoring: the scope is limited to CPU-scheduled
-    processes on the host kernel. GPU kernel execution, CUDA stream
-    scheduling, and DMA transfer latency are not within scope.
+(d) GPU and accelerator monitoring: the scope is limited to CPU-scheduled processes on the host kernel. GPU kernel execution, CUDA stream scheduling, and DMA transfer latency are not within scope.
 
-(e) Cross-platform support: while eBPF CO-RE enables kernel version portability
-    within Linux, the project targets Linux exclusively. Windows, macOS, and
-    BSD variants are out of scope.
+(e) Cross-platform support: while eBPF CO-RE enables kernel version portability within Linux, the project targets Linux exclusively. Windows, macOS, and BSD variants are out of scope.
 
-(f) Production deployment hardening: aspects such as eBPF program signing,
-    capability-reduced privilege models, and integration with observability
-    platforms (Prometheus, Grafana, OpenTelemetry) are considered future work.
+(f) Production deployment hardening: aspects such as eBPF program signing, capability-reduced privilege models, and integration with observability platforms (Prometheus, Grafana, OpenTelemetry) are considered future work.
 
+------------------------------------------------------------------------ 1.5 METHODOLOGY ------------------------------------------------------------------------
 
-------------------------------------------------------------------------
-1.5  METHODOLOGY
-------------------------------------------------------------------------
+1.5.1 DEVELOPMENT METHODOLOGY
 
-1.5.1  DEVELOPMENT METHODOLOGY
+The project followed an iterative, Agile-inspired development model structured around three progressive design approaches. Rather than committing to a fixed architecture at the outset, each approach was developed, evaluated against measurable criteria (data quality, model accuracy, overhead), and its failure modes documented before proceeding to the next iteration.
 
-The project followed an iterative, Agile-inspired development model structured
-around three progressive design approaches. Rather than committing to a fixed
-architecture at the outset, each approach was developed, evaluated against
-measurable criteria (data quality, model accuracy, overhead), and its failure
-modes documented before proceeding to the next iteration.
+Approach 1 (Time-Series Polling) formed the baseline, establishing that continuous userspace polling from eBPF maps during active workloads introduces sufficient scheduler overhead to contaminate the collected signal. This failure was identified through cross-label statistical analysis in Jupyter notebooks, which revealed suspiciously similar feature distributions across different workload types — a signature of observer-induced noise rather than genuine workload variation.
 
-Approach 1 (Time-Series Polling) formed the baseline, establishing that
-continuous userspace polling from eBPF maps during active workloads introduces
-sufficient scheduler overhead to contaminate the collected signal. This failure
-was identified through cross-label statistical analysis in Jupyter notebooks,
-which revealed suspiciously similar feature distributions across different
-workload types — a signature of observer-induced noise rather than genuine
-workload variation.
+Approach 2 (Snapshot Collection with Session Labels) adopted the pinned map architecture to eliminate polling overhead, and demonstrated that the infrastructure was sound. However, session-level label assignment was found to be semantically incorrect: labelling an entire session as "cpu_bound" does not mean that every process in that session is experiencing CPU bottleneck. This limitation was quantified through cross-validation, which showed F1 score variance exceeding 0.25 across folds on the 25-session dataset.
 
-Approach 2 (Snapshot Collection with Session Labels) adopted the pinned map
-architecture to eliminate polling overhead, and demonstrated that the
-infrastructure was sound. However, session-level label assignment was found to
-be semantically incorrect: labelling an entire session as "cpu_bound" does not
-mean that every process in that session is experiencing CPU bottleneck. This
-limitation was quantified through cross-validation, which showed F1 score
-variance exceeding 0.25 across folds on the 25-session dataset.
+Approach 3 (Process-Level Kernel-Verified Classification) is the final and primary contribution. It retained the pinned map architecture of Approach 2 and introduced kernel-derived per-process labels based on avg_stall_ns, resolving the semantic mismatch identified in Approach 2.
 
-Approach 3 (Process-Level Kernel-Verified Classification) is the final and
-primary contribution. It retained the pinned map architecture of Approach 2
-and introduced kernel-derived per-process labels based on avg_stall_ns,
-resolving the semantic mismatch identified in Approach 2.
+Each iteration consisted of the following sprint-level activities: - Kernel instrumentation design and eBPF program authoring - Compilation and BPF verifier validation - Data collection using stress-ng workloads - Exploratory data analysis in Jupyter notebooks - Model training, evaluation, and feature importance verification - Documentation of findings and identified limitations
 
-Each iteration consisted of the following sprint-level activities:
-  - Kernel instrumentation design and eBPF program authoring
-  - Compilation and BPF verifier validation
-  - Data collection using stress-ng workloads
-  - Exploratory data analysis in Jupyter notebooks
-  - Model training, evaluation, and feature importance verification
-  - Documentation of findings and identified limitations
-
-1.5.2  SYSTEM PIPELINE OVERVIEW
+1.5.2 SYSTEM PIPELINE OVERVIEW
 
 The end-to-end system pipeline operates as follows:
 
-Step 1 — INSTRUMENTATION: The eBPF program (perf_monitor.bpf.c) is compiled
-to BPF bytecode using Clang with BTF debug information. The pinner binary
-(pinner.c) loads the BPF object via libbpf, auto-pins all four aggregate maps
-to /sys/fs/bpf/, and attaches all tracepoint and kprobe handlers. The pinner
-then enters a blocking wait loop, consuming zero CPU while BPF programs
-accumulate metrics in kernel space.
+Step 1 — INSTRUMENTATION: The eBPF program (perf_monitor.bpf.c) is compiled to BPF bytecode using Clang with BTF debug information. The pinner binary (pinner.c) loads the BPF object via libbpf, auto-pins all four aggregate maps to /sys/fs/bpf/, and attaches all tracepoint and kprobe handlers. The pinner then enters a blocking wait loop, consuming zero CPU while BPF programs accumulate metrics in kernel space.
 
-Step 2 — WORKLOAD EXECUTION: A stress-ng workload (or idle baseline) runs
-concurrently. The BPF scheduler, memory, syscall, and lock handlers fire on
-every relevant kernel event and update the per-(pid, cpu) map entries
-atomically in kernel space.
+Step 2 — WORKLOAD EXECUTION: A stress-ng workload (or idle baseline) runs concurrently. The BPF scheduler, memory, syscall, and lock handlers fire on every relevant kernel event and update the per-(pid, cpu) map entries atomically in kernel space.
 
-Step 3 — SESSION TERMINATION: Upon SIGINT, the pinner records the session
-end timestamp to /tmp/perf_session.meta using CLOCK_MONOTONIC, ensuring
-clock reference alignment with bpf_ktime_get_ns() timestamps in the maps.
+Step 3 — SESSION TERMINATION: Upon SIGINT, the pinner records the session end timestamp to /tmp/perf_session.meta using CLOCK_MONOTONIC, ensuring clock reference alignment with bpf_ktime_get_ns() timestamps in the maps.
 
-Step 4 — DATA EXTRACTION: The reader binary (reader.c) opens the pinned maps
-via bpf_obj_get(), reads the session metadata, applies warmup (first 5 s) and
-teardown (last 2 s) trimming based on each entry's last_update_ns field, merges
-all four maps by (pid, cpu) key, and writes a single structured CSV row per
-unique process-CPU pair.
+Step 4 — DATA EXTRACTION: The reader binary (reader.c) opens the pinned maps via bpf_obj_get(), reads the session metadata, applies warmup (first 5 s) and teardown (last 2 s) trimming based on each entry's last_update_ns field, merges all four maps by (pid, cpu) key, and writes a single structured CSV row per unique process-CPU pair.
 
-Step 5 — ML PIPELINE: Jupyter notebooks load the accumulated CSV, apply
-cleaning filters (ctx_switches > 0, pid > 0, latency_count > 0), derive the
-4-class label y from avg_stall_ns thresholds, engineer ratio and log-scaled
-features, partition train and test sets by session_id using GroupShuffleSplit,
-and train Random Forest and XGBoost classifiers with balanced class weights.
-Model artifacts are serialised as rf_bottleneck_classifier.pkl and
-xgb_bottleneck_classifier.pkl.
-
+Step 5 — ML PIPELINE: Jupyter notebooks load the accumulated CSV, apply cleaning filters (ctx_switches > 0, pid > 0, latency_count > 0), derive the 4-class label y from avg_stall_ns thresholds, engineer ratio and log-scaled features, partition train and test sets by session_id using GroupShuffleSplit, and train Random Forest and XGBoost classifiers with balanced class weights. Model artifacts are serialised as rf_bottleneck_classifier.pkl and xgb_bottleneck_classifier.pkl.
 
 ------------------------------------------------------------------------
 1.6  TOOLS AND TECHNOLOGIES
@@ -743,41 +519,16 @@ project.
 1.7  CHAPTER SUMMARY
 ------------------------------------------------------------------------
 
-This chapter established the foundational context for the project. Section 1.1
-provided an in-depth analysis of the observability challenges inherent to
-multicore operating system scheduling, identifying the mechanisms by which
-resource contention manifests as measurable latency at the process level.
-Section 1.2 formalised five specific deficiencies in existing performance
-monitoring approaches — measurement overhead, absence of per-process root-cause
-attribution, stressor-versus-victim semantic mismatch, clock reference
-inconsistency, and dataset sparsity — that collectively motivate the
-architectural choices made in this project.
+This chapter established the foundational context for the project. Section 1.1 provided an in-depth analysis of the observability challenges inherent to multicore operating system scheduling, identifying the mechanisms by which resource contention manifests as measurable latency at the process level. Section 1.2 formalised five specific deficiencies in existing performance monitoring approaches — measurement overhead, absence of per-process root-cause attribution, stressor-versus-victim semantic mismatch, clock reference inconsistency, and dataset sparsity — that collectively motivate the architectural choices made in this project.
 
-Section 1.3 defined seven technical, measurable objectives spanning kernel
-instrumentation design, data pipeline architecture, label schema definition,
-automated data collection, ML pipeline construction, model validation, and
-overhead quantification. Section 1.4 bounded the project by specifying what
-is and is not within scope, establishing that the project targets offline
-per-process classification on Linux x86-64 without network monitoring, GPU
-support, or real-time inference.
+Section 1.3 defined seven technical, measurable objectives spanning kernel instrumentation design, data pipeline architecture, label schema definition, automated data collection, ML pipeline construction, model validation, and overhead quantification. Section 1.4 bounded the project by specifying what is and is not within scope, establishing that the project targets offline per-process classification on Linux x86-64 without network monitoring, GPU support, or real-time inference.
 
-Section 1.5 described the iterative Agile methodology through which three
-successive design approaches were developed, evaluated, and refined, and
-provided a step-by-step overview of the five-stage data pipeline from eBPF
-instrumentation through ML model serialisation. Section 1.6 catalogued the
-complete set of tools and technologies — eBPF, libbpf, Clang, C, Bash,
-stress-ng, Python, scikit-learn, and XGBoost — with their specific roles
-in the project.
+Section 1.5 described the iterative Agile methodology through which three successive design approaches were developed, evaluated, and refined, and provided a step-by-step overview of the five-stage data pipeline from eBPF instrumentation through ML model serialisation. Section 1.6 catalogued the complete set of tools and technologies — eBPF, libbpf, Clang, C, Bash, stress-ng, Python, scikit-learn, and XGBoost — with their specific roles in the project.
 
-The subsequent chapter presents a structured survey of the related literature,
-covering polling-based monitoring tools, hardware performance counter
-approaches, kernel tracing frameworks, and machine learning methods for systems
-diagnosis, leading to an identification of the research gap that this project
-addresses.
+The subsequent chapter presents a structured survey of the related literature, covering polling-based monitoring tools, hardware performance counter approaches, kernel tracing frameworks, and machine learning methods for systems diagnosis, leading to an identification of the research gap that this project addresses.
 
 [Page: 1–6]
 
 ================================================================================
 END OF CHAPTER 1
 ================================================================================
-
