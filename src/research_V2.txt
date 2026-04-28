@@ -1,0 +1,39 @@
+# Research Work Summary - V2 (Approach 3)
+
+## Phase 5: Process-Level Bottleneck Diagnosis (Approach 3)
+
+### Core Schema Shift
+Following the limitations of session-level aggregation (extreme sparsity and signal dilution discussed in v1), Approach 3 shifts the fundamental unit of analysis from the *session* to the *individual process* (row-level classification). Instead of trying to classify the overall system state, the model now diagnoses the bottleneck severity experienced by each `(pid, cpu)` pair. 
+
+This solves the sparsity issue because background processes (like `systemd-oomd` or kernel threads) will correctly be classified as normal/idle, while victim processes or stressor workers will be classified as bottlenecked. This reflects reality: a system is not uniformly bottlenecked; specific processes are starved while others might be unaffected.
+
+### ML Target Definition
+To achieve per-process classification, the target label is no longer derived from the `stress-ng` session type (e.g., `--label cpu_high`). Instead, the session label is just a descriptor, and the true ML target (`y`) is derived objectively from the `avg_stall_ns` (average runqueue latency per context switch) of each process:
+- **Class 0 (Normal):** < 2ms latency
+- **Class 1 (Low):** < 10ms latency
+- **Class 2 (Medium):** < 50ms latency
+- **Class 3 (High):** >= 50ms latency
+
+Secondary signals (like `avg_runq_ratio`, `involuntary_switches / ctx_switches`, `mutex_contentions`) are used by the model to confirm the nature of the bottleneck.
+
+### Data Collection & Automation
+Data collection was heavily automated using shell scripts (`autoData.sh` series) to generate a robust dataset. The protocol involved running 90-150 second sessions under various `stress-ng` conditions (CPU, Memory, I/O, Lock contention, and mixed loads) alongside idle baselines. 
+The eBPF `pinner` and `reader` components (from Phase 2) were reused to accumulate metrics in kernel space and extract them safely. The goal was to build a minimum viable dataset of 50,000+ rows across 12-15 sessions to ensure reliable generalization.
+
+### Preprocessing & Feature Engineering
+Data cleaning and feature engineering pipelines were established in Jupyter notebooks to process the raw CSVs before model training:
+1. **Cleaning:** Dropping processes with 0 context switches, idle kernel threads (`pid=0`), and processes with 0 latency samples (never woken up).
+2. **Feature Derivation:** Creating informative ratio features to capture system pressure:
+   - `involuntary_ratio`: Proxy for CPU contention
+   - `voluntary_ratio`: Proxy for I/O wait
+   - `alloc_pressure`: `total_alloc_bytes` per context switch
+   - `runtime_per_switch`: Execution time per timeslice
+   - `read_write_ratio`, `lock_pressure`
+3. **Log-scaling:** Applying log transformations to highly skewed latency distributions (`stall_ns`, `total_runtime_ns`, `avg_syscall_latency_ns`).
+
+### Model Training & Validation
+The classification models (Random Forest and XGBoost) were trained using a 4-class setup. To prevent data leakage, a GroupShuffleSplit strategy was used to partition train/test sets by `session_id` rather than random rows. This ensures the model learns generalizable bottleneck signatures rather than memorizing session-specific nuances.
+
+Because normal/background activity vastly outnumbers severe bottlenecks (even during heavy stress), class imbalance was handled natively using `class_weight='balanced'` in the classifiers. 
+
+Feature importance analysis was configured to act as a sanity check—verifying that `avg_stall_ns` and its derived features correctly dominate the model's decision-making process, alongside `involuntary_ratio` and `avg_runq_ratio`. Output artifacts confirm successful model training with `rf_bottleneck_classifier.pkl` and `xgb_bottleneck_classifier.pkl` saved in the environment.

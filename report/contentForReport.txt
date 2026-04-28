@@ -1,0 +1,308 @@
+================================================================================
+  BCS685 – PROJECT PHASE I REPORT
+  AI-ASSISTED PERFORMANCE BOTTLENECK DIAGNOSIS FOR MULTICORE SYSTEMS
+  USING eBPF AND MACHINE LEARNING
+================================================================================
+
+NOTE TO TYPESETTER:
+  - Roman numerals (i, ii, iii, ...) for front matter pages
+  - Arabic numerals (1, 2, 3, ...) from Chapter 1 onward
+  - All section numbers, figure numbers, and table numbers are final
+  - Page numbers marked as [p. X] are placeholders — replace after layout
+================================================================================
+
+
+================================================================================
+ABSTRACT
+================================================================================
+
+Modern multicore systems suffer from performance degradation that conventional
+monitoring tools cannot diagnose without imposing significant measurement
+overhead. Tools such as perf, top, and sar rely on periodic userspace polling,
+which itself introduces scheduler interference and dilutes the very signals they
+aim to capture.
+
+This project presents a low-overhead, AI-assisted system for per-process
+performance bottleneck diagnosis. The core instrumentation layer is implemented
+using extended Berkeley Packet Filter (eBPF) programs attached to kernel
+tracepoints and kprobes, covering CPU scheduling, memory allocation, system
+call latency, and lock contention. A key architectural innovation is the use of
+pinned eBPF maps on the BPF virtual filesystem (/sys/fs/bpf/), which allows
+metrics to accumulate entirely in kernel space with zero userspace polling
+overhead during observation. A separate reader process drains the maps once,
+at session end, producing a structured CSV dataset.
+
+The machine learning pipeline, built in Python using scikit-learn and XGBoost,
+performs per-process 4-class bottleneck severity classification (Normal, Low,
+Medium, High) derived from measured runqueue latency (avg_stall_ns). A
+GroupShuffleSplit training strategy prevents data leakage across collection
+sessions. The trained Random Forest and XGBoost classifiers were validated on
+a dataset exceeding 50,000 process-level observations, with feature importance
+analysis confirming that avg_stall_ns and involuntary_ratio dominate
+classification decisions — consistent with kernel scheduling theory.
+
+Keywords: eBPF, performance monitoring, bottleneck diagnosis, machine learning,
+runqueue latency, kernel tracepoints, multicore systems.
+
+[Page: i]
+
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+                                                                        Page No.
+
+ABSTRACT  . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  [p. i]
+TABLE OF CONTENTS . . . . . . . . . . . . . . . . . . . . . . . . . .  [p. ii]
+LIST OF FIGURES . . . . . . . . . . . . . . . . . . . . . . . . . . .  [p. iv]
+LIST OF TABLES  . . . . . . . . . . . . . . . . . . . . . . . . . . .  [p. v]
+LIST OF ABBREVIATIONS . . . . . . . . . . . . . . . . . . . . . . . .  [p. vi]
+ACKNOWLEDGEMENT . . . . . . . . . . . . . . . . . . . . . . . . . . .  [p. vii]
+
+------------------------------------------------------------------------
+
+CHAPTER 1 — INTRODUCTION  . . . . . . . . . . . . . . . . . . . . . .  [p. 1]
+
+  1.1   Background and Motivation  . . . . . . . . . . . . . . . . . .  [p. 1]
+  1.2   Problem Statement  . . . . . . . . . . . . . . . . . . . . . .  [p. 3]
+  1.3   Objectives of the Project  . . . . . . . . . . . . . . . . . .  [p. 4]
+  1.4   Scope of the Project . . . . . . . . . . . . . . . . . . . . .  [p. 5]
+  1.5   Organisation of the Report  . . . . . . . . . . . . . . . . .  [p. 6]
+
+------------------------------------------------------------------------
+
+CHAPTER 2 — LITERATURE SURVEY  . . . . . . . . . . . . . . . . . . .  [p. 7]
+
+  2.1   Overview of Performance Monitoring Techniques  . . . . . . . .  [p. 7]
+        2.1.1   Polling-Based Monitoring Tools . . . . . . . . . . . .  [p. 7]
+        2.1.2   Hardware Performance Counters  . . . . . . . . . . . .  [p. 8]
+        2.1.3   Kernel Tracing Frameworks  . . . . . . . . . . . . . .  [p. 9]
+  2.2   Extended Berkeley Packet Filter (eBPF)  . . . . . . . . . . .  [p. 10]
+        2.2.1   eBPF Architecture and Verifier . . . . . . . . . . . .  [p. 10]
+        2.2.2   eBPF Maps and Pinning  . . . . . . . . . . . . . . . .  [p. 11]
+        2.2.3   libbpf and CO-RE  . . . . . . . . . . . . . . . . . .  [p. 12]
+  2.3   Machine Learning for Systems Diagnosis . . . . . . . . . . . .  [p. 13]
+        2.3.1   Anomaly Detection Approaches . . . . . . . . . . . . .  [p. 13]
+        2.3.2   Classification-Based Approaches  . . . . . . . . . . .  [p. 14]
+        2.3.3   Feature Engineering for OS Metrics . . . . . . . . . .  [p. 15]
+  2.4   Comparative Analysis of Related Works  . . . . . . . . . . . .  [p. 16]
+  2.5   Research Gaps and Motivation for This Work . . . . . . . . . .  [p. 17]
+
+------------------------------------------------------------------------
+
+CHAPTER 3 — SYSTEM DESIGN AND ARCHITECTURE  . . . . . . . . . . . . .  [p. 19]
+
+  3.1   System Overview  . . . . . . . . . . . . . . . . . . . . . . .  [p. 19]
+  3.2   Design Evolution: Approach Comparison  . . . . . . . . . . . .  [p. 20]
+        3.2.1   Approach 1 — Time-Series Polling (Baseline)  . . . . .  [p. 20]
+        3.2.2   Approach 2 — Snapshot Collection with Session Labels .  [p. 21]
+        3.2.3   Approach 3 — Process-Level Classification with
+                Kernel-Verified Labels (Final Architecture) . . . . .  [p. 22]
+  3.3   eBPF Instrumentation Layer . . . . . . . . . . . . . . . . . .  [p. 24]
+        3.3.1   Tracepoints and Kprobes Attached . . . . . . . . . . .  [p. 24]
+        3.3.2   BPF Map Structures . . . . . . . . . . . . . . . . . .  [p. 25]
+        3.3.3   Map Pinning Architecture . . . . . . . . . . . . . . .  [p. 27]
+        3.3.4   Runqueue Latency Measurement Mechanism  . . . . . . .  [p. 28]
+  3.4   Userspace Collection Pipeline  . . . . . . . . . . . . . . . .  [p. 29]
+        3.4.1   The Pinner Binary  . . . . . . . . . . . . . . . . . .  [p. 29]
+        3.4.2   The Reader Binary and Warmup Trimming  . . . . . . . .  [p. 30]
+        3.4.3   Automated Data Collection Scripts  . . . . . . . . . .  [p. 31]
+  3.5   Machine Learning Pipeline  . . . . . . . . . . . . . . . . . .  [p. 32]
+        3.5.1   Label Definition and Class Schema  . . . . . . . . . .  [p. 32]
+        3.5.2   Data Preprocessing and Cleaning  . . . . . . . . . . .  [p. 33]
+        3.5.3   Feature Engineering  . . . . . . . . . . . . . . . . .  [p. 34]
+        3.5.4   Model Selection and Training . . . . . . . . . . . . .  [p. 35]
+        3.5.5   Session-Aware Train/Test Split Strategy  . . . . . . .  [p. 36]
+  3.6   Design Constraints and Engineering Trade-offs  . . . . . . . .  [p. 37]
+
+------------------------------------------------------------------------
+
+CHAPTER 4 — IMPLEMENTATION  . . . . . . . . . . . . . . . . . . . . .  [p. 39]
+
+  4.1   Development Environment and Tools  . . . . . . . . . . . . . .  [p. 39]
+  4.2   eBPF Program Implementation . . . . . . . . . . . . . . . . .  [p. 40]
+        4.2.1   Scheduler Tracepoint Handlers  . . . . . . . . . . . .  [p. 40]
+        4.2.2   Memory Pressure Handlers . . . . . . . . . . . . . . .  [p. 42]
+        4.2.3   System Call Latency Handlers . . . . . . . . . . . . .  [p. 43]
+        4.2.4   Lock Contention Handlers (Kprobe-Based)  . . . . . . .  [p. 44]
+  4.3   Pinner and Reader Implementation . . . . . . . . . . . . . . .  [p. 45]
+        4.3.1   Session Lifecycle Management . . . . . . . . . . . . .  [p. 45]
+        4.3.2   Clock Consistency: CLOCK_MONOTONIC Alignment . . . . .  [p. 46]
+        4.3.3   CSV Schema and Column Design . . . . . . . . . . . . .  [p. 47]
+  4.4   Data Collection Automation (autoData.sh)  . . . . . . . . . .  [p. 48]
+  4.5   Jupyter Notebook ML Pipeline . . . . . . . . . . . . . . . . .  [p. 49]
+        4.5.1   Exploratory Data Analysis  . . . . . . . . . . . . . .  [p. 49]
+        4.5.2   Label Derivation from avg_stall_ns . . . . . . . . . .  [p. 50]
+        4.5.3   Random Forest Classifier Training  . . . . . . . . . .  [p. 51]
+        4.5.4   XGBoost Classifier Training  . . . . . . . . . . . . .  [p. 52]
+        4.5.5   Feature Importance Analysis  . . . . . . . . . . . . .  [p. 53]
+
+------------------------------------------------------------------------
+
+CHAPTER 5 — RESULTS AND DISCUSSION  . . . . . . . . . . . . . . . . .  [p. 55]
+
+  5.1   Dataset Summary  . . . . . . . . . . . . . . . . . . . . . . .  [p. 55]
+  5.2   Class Distribution Analysis . . . . . . . . . . . . . . . . .  [p. 56]
+  5.3   Runqueue Stall Distribution by Session Type  . . . . . . . . .  [p. 57]
+  5.4   Classifier Performance  . . . . . . . . . . . . . . . . . . .  [p. 58]
+        5.4.1   Random Forest Evaluation . . . . . . . . . . . . . . .  [p. 58]
+        5.4.2   XGBoost Evaluation . . . . . . . . . . . . . . . . . .  [p. 59]
+        5.4.3   Comparative Model Performance  . . . . . . . . . . . .  [p. 60]
+  5.5   Feature Importance Analysis  . . . . . . . . . . . . . . . . .  [p. 61]
+  5.6   Overhead Analysis  . . . . . . . . . . . . . . . . . . . . . .  [p. 62]
+  5.7   Comparison with Prior Approaches . . . . . . . . . . . . . . .  [p. 63]
+
+------------------------------------------------------------------------
+
+CHAPTER 6 — CONCLUSION AND FUTURE WORK . . . . . . . . . . . . . . .  [p. 65]
+
+  6.1   Summary of Contributions . . . . . . . . . . . . . . . . . . .  [p. 65]
+  6.2   Limitations  . . . . . . . . . . . . . . . . . . . . . . . . .  [p. 66]
+  6.3   Future Work  . . . . . . . . . . . . . . . . . . . . . . . . .  [p. 67]
+
+------------------------------------------------------------------------
+
+REFERENCES  . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  [p. 69]
+
+[Page: ii–iii]
+
+
+================================================================================
+LIST OF FIGURES
+================================================================================
+
+Figure No.    Title                                                      Page No.
+
+Fig. 3.1      High-level system architecture of the proposed eBPF-based
+              performance monitoring and ML classification pipeline . .  [p. 19]
+
+Fig. 3.2      Approach evolution diagram — from time-series polling
+              (Approach 1) through snapshot collection (Approach 2) to
+              process-level kernel-verified classification (Approach 3)  [p. 20]
+
+Fig. 3.3      eBPF map pinning architecture — interaction between the
+              pinner binary, BPF virtual filesystem (/sys/fs/bpf/),
+              and the reader binary across the session lifecycle  . . .  [p. 27]
+
+Fig. 5.1      Class distribution of the training dataset showing the
+              natural imbalance across Normal (Class 0), Low (Class 1),
+              Medium (Class 2), and High (Class 3) severity levels . .  [p. 56]
+
+Fig. 5.2      Runqueue stall latency (avg_stall_ns) distribution across
+              all session types, log-scaled, illustrating the clear
+              separation between bottlenecked and normal processes  . .  [p. 57]
+
+Fig. 5.3      Confusion matrix for the Random Forest classifier
+              evaluated on the held-out test set (GroupShuffleSplit,
+              20% test, session-aware partitioning)  . . . . . . . . .  [p. 58]
+
+Fig. 5.4      Top-15 feature importance rankings from the trained
+              Random Forest model, confirming dominance of avg_stall_ns
+              and involuntary_ratio  . . . . . . . . . . . . . . . . .  [p. 61]
+
+Fig. 5.5      Per-class precision, recall, and F1-score comparison
+              between the Random Forest and XGBoost classifiers  . . .  [p. 60]
+
+[Page: iv]
+
+
+================================================================================
+LIST OF TABLES
+================================================================================
+
+Table No.     Title                                                      Page No.
+
+Table 2.1     Comparative analysis of related performance monitoring
+              and bottleneck detection approaches with respect to
+              overhead, granularity, and ML integration  . . . . . . .  [p. 16]
+
+Table 3.1     Summary of eBPF BPF map structures — map name, key type,
+              value struct, and instrumented kernel events  . . . . . .  [p. 25]
+
+Table 3.2     4-class bottleneck severity label schema derived from
+              avg_stall_ns (runqueue latency) thresholds  . . . . . .  [p. 32]
+
+Table 3.3     Engineered feature set — feature name, derivation formula,
+              and system behaviour it encodes  . . . . . . . . . . . .  [p. 34]
+
+Table 4.1     Data collection session protocol — session label, stress-ng
+              stressor arguments, duration, and approximate row yield .  [p. 48]
+
+Table 5.1     Dataset summary statistics — total rows, rows per class,
+              sessions collected, and post-cleaning row count  . . . .  [p. 55]
+
+Table 5.2     Classification report for the Random Forest classifier —
+              per-class precision, recall, F1-score, and support . . .  [p. 58]
+
+Table 5.3     Classification report for the XGBoost classifier —
+              per-class precision, recall, F1-score, and support . . .  [p. 59]
+
+Table 5.4     Approach comparison — Approach 1 vs Approach 2 vs
+              Approach 3 with respect to collection overhead, label
+              reliability, dataset size, and classification accuracy .  [p. 63]
+
+[Page: v]
+
+
+================================================================================
+LIST OF ABBREVIATIONS
+================================================================================
+
+Abbreviation    Expansion
+---------------------------------------------------------------------------
+AI              Artificial Intelligence
+API             Application Programming Interface
+avg             Average
+BPF             Berkeley Packet Filter
+BTF             BPF Type Format
+C&C             Command and Control
+CFS             Completely Fair Scheduler
+CO-RE           Compile Once – Run Everywhere
+CPU             Central Processing Unit
+CSV             Comma-Separated Values
+ctx             Context
+eBPF            Extended Berkeley Packet Filter
+ELF             Executable and Linkable Format
+FD              File Descriptor
+F1              F1 Score (Harmonic Mean of Precision and Recall)
+GB              Gigabyte
+GFP             Get Free Pages (kernel memory allocation flag)
+GPIO            General Purpose Input/Output
+IPC             Instructions Per Cycle
+I/O             Input / Output
+KI              Kernel Instrumentation
+kprobe          Kernel Dynamic Probe
+KVM             Kernel-based Virtual Machine
+libbpf          BPF Userspace Library
+LLC             Last-Level Cache
+LRU             Least Recently Used
+mmap            Memory-Mapped File
+ML              Machine Learning
+ms              Millisecond
+ns              Nanosecond
+NVMe            Non-Volatile Memory Express
+OS              Operating System
+perf            Linux Performance Events Subsystem
+PID             Process Identifier
+pkl             Pickle File (Python serialised model artifact)
+POSIX           Portable Operating System Interface
+RAM             Random Access Memory
+RF              Random Forest
+rwsem           Reader-Writer Semaphore
+sec / s         Second
+SLO             Service Level Objective
+SMP             Symmetric Multiprocessing
+syscall         System Call
+TLB             Translation Lookaside Buffer
+tp              Tracepoint
+uprobe          User-Space Dynamic Probe
+VFS             Virtual File System
+vmlinux         Monolithic Linux Kernel Image (symbol source for BTF)
+XGBoost         Extreme Gradient Boosting
+
+[Page: vi]
+
+================================================================================
+END OF FRONT MATTER
+================================================================================
