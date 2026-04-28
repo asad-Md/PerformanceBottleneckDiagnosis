@@ -1,0 +1,83 @@
+================================================================================
+
+
+================================================================================
+CHAPTER 3
+SYSTEM DESIGN
+================================================================================
+
+[Page: 19]
+
+------------------------------------------------------------------------
+3.1  SYSTEM ARCHITECTURE
+------------------------------------------------------------------------
+
+The system architecture follows a low-overhead, decoupled pipeline that transforms raw kernel scheduling events into process-level bottleneck diagnoses. The pipeline is structured into four primary stages:
+
+1.  eBPF Kernel Instrumentation: eBPF programs (attached to tracepoints and kprobes) capture high-frequency events (context switches, page faults, syscalls) and accumulate them in pinned BPF maps in kernel space.
+2.  Userspace Data Extraction: A lightweight C binary (reader) atomicially drains the BPF maps at the end of a collection session, writing the metrics to a CSV dataset.
+3.  Machine Learning Pipeline: A Python-based ML pipeline preprocesses the CSV data, derives target labels, and trains classification models (Random Forest, XGBoost) to identify bottleneck severity.
+4.  Diagnosis Output: The model outputs a 4-class severity diagnosis (Normal, Low, Medium, High) for each (pid, cpu) pair based on its latency and resource profile.
+
+------------------------------------------------------------------------
+3.2  APPROACH EVOLUTION
+------------------------------------------------------------------------
+
+The system design evolved through three distinct approaches, with the final architecture (Approach 3) addressing the fundamental limitations of the earlier iterations.
+
+Approach 1: Time-Series Polling (Baseline)
+This approach relied on a userspace process continuously polling BPF maps. 
+Failure Reason: The continuous polling introduced significant scheduler overhead, contaminating the very performance signals it aimed to measure and leading to indistinguishable feature distributions across workloads.
+
+Approach 2: Snapshot Collection with Session Labels
+To eliminate polling overhead, this approach used pinned BPF maps to accumulate data in the kernel, drained only once at session end. Entire sessions were labeled based on the stressor applied.
+Failure Reason: Applying a single label to an entire session caused extreme signal dilution. Background processes were incorrectly labeled as "bottlenecked" simply for existing during a stress test, leading to unreliable model generalization.
+
+Approach 3: Process-Level Classification (Final Optimized System)
+The final architecture retains the pinned map design but shifts the unit of analysis from the session to the individual process. Instead of session-level labels, the ML target is derived objectively from the avg_stall_ns (runqueue latency) of each (pid, cpu) pair. 
+Key Advantages:
+- Eliminates signal dilution by correctly classifying background processes as normal/idle.
+- Provides granular, root-cause attribution at the process level.
+- Employs GroupShuffleSplit on session_id to prevent data leakage during training.
+- Handles natural class imbalance natively using balanced class weights in the ML models.
+
+------------------------------------------------------------------------
+3.3  MODULE DESIGN
+------------------------------------------------------------------------
+
+3.3.1 eBPF Data Collection
+This module consists of C-based eBPF programs compiled with Clang. It utilizes tracepoints for scheduler and memory events, and kprobes for lock contention. Metrics are aggregated per (pid, cpu) in BPF hash maps.
+
+3.3.2 Metric Processing
+The pinner and reader C binaries manage the session lifecycle. The reader applies warmup (first 5s) and teardown (last 2s) trimming using CLOCK_MONOTONIC timestamps to ensure data consistency, and serializes the maps into a unified CSV schema.
+
+3.3.3 ML Inference Engine
+Built in Python using scikit-learn and XGBoost. It handles data cleaning (dropping 0-latency samples), feature engineering (creating ratio features like involuntary_ratio), log-scaling skewed distributions, and multi-class classification.
+
+3.3.4 Output/Diagnostic Layer
+The system outputs a detailed classification report, identifying the specific processes suffering from resource starvation and categorizing the severity (0 to 3) based on learned bottleneck signatures.
+
+------------------------------------------------------------------------
+3.4  DESIGN DECISIONS
+------------------------------------------------------------------------
+
+- KPI Selection Reasoning: avg_stall_ns (runqueue wait time) was selected as the primary ground-truth metric for CPU bottlenecks because it directly measures scheduler starvation, unlike generic CPU utilization percentages. Secondary features like involuntary_ratio provide context on contention.
+- Overhead Reduction Strategies: The use of pinned BPF maps entirely eliminates the need for periodic userspace polling. Instrumentation logic is kept minimal, simply updating map counters to ensure sub-microsecond overhead per event.
+- Optimization Logic: Highly skewed metrics (e.g., raw latency in nanoseconds) are log-scaled (log1p) before training to normalize feature distributions and improve model convergence.
+
+------------------------------------------------------------------------
+3.5  IMPLEMENTATION DETAILS
+------------------------------------------------------------------------
+
+3.5.1 eBPF Programs
+Implemented in perf_monitor.bpf.c. High-level logic hooks into sched:sched_switch and sched:sched_wakeup to calculate runqueue latency. The programs use bpf_ktime_get_ns() for nanosecond-precision timestamps.
+
+3.5.2 C Integration
+The userspace components (pinner.c and reader.c) use libbpf to load the BPF object, pin maps to /sys/fs/bpf/, and perform atomic map lookups. This ensures safe and decoupled data extraction.
+
+3.5.3 Python ML Pipeline
+Data is processed using pandas. The 4-class target is threshold-based: <2ms (Normal), <10ms (Low), <50ms (Medium), and >=50ms (High). The pipeline trains RandomForestClassifier and XGBClassifier models, utilizing feature importance validation to ensure the model makes decisions based on genuine scheduler signals rather than dataset artifacts.
+
+================================================================================
+END OF CHAPTER 3
+================================================================================
