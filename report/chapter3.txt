@@ -34,7 +34,7 @@ To eliminate polling overhead, this approach used pinned BPF maps to accumulate 
 Failure Reason: Applying a single label to an entire session caused extreme signal dilution. Background processes were incorrectly labeled as "bottlenecked" simply for existing during a stress test, leading to unreliable model generalization.
 
 Approach 3: Process-Level Classification (Final Optimized System)
-The final architecture retains the pinned map design but shifts the unit of analysis from the session to the individual process. Instead of session-level labels, the ML target is derived objectively from the avg_stall_ns (runqueue latency) of each (pid, cpu) pair. 
+The final architecture retains the pinned map design but shifts the unit of analysis from the session to the individual process.     
 Key Advantages:
 - Eliminates signal dilution by correctly classifying background processes as normal/idle.
 - Provides granular, root-cause attribution at the process level.
