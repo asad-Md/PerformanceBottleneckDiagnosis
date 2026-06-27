@@ -1,36 +1,83 @@
+# ==================================================
 # Virtual environments
+# ==================================================
 **/tf_gpu_env/
 **/venv/
 **/.venv/
+.venv/
+venv/
+env/
 
-# Local Python installation used by Codex
+# ==================================================
+# Local tools installed by Codex
+# ==================================================
 .tools/
 
-# Python cache
+# ==================================================
+# Python cache and compiled files
+# ==================================================
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.so
+.python-version
+
+# ==================================================
+# Jupyter
+# ==================================================
 .ipynb_checkpoints/
-
-# Jupyter outputs
 *.executed.ipynb
+*.nbconvert.ipynb
 
-# IDE
+# ==================================================
+# IDEs and editors
+# ==================================================
 .vscode/
 .idea/
+*.swp
+*.swo
 
+# ==================================================
 # Test folders
+# ==================================================
 **/testers/**
 src/approach3/testers/
 
+# ==================================================
 # OS files
+# ==================================================
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Generated ML artifacts (can be regenerated)
+# ==================================================
+# Logs
+# ==================================================
+*.log
+
+# ==================================================
+# ML artifacts that can be regenerated
+# ==================================================
 src/ml/artifacts/*.png
 src/ml/artifacts/*.csv
 
-# Optional: don't commit notebook outputs
-*.nbconvert.ipynb
+# ==================================================
+# Optional model artifacts
+# ==================================================
+*.pkl
+*.joblib
+*.h5
+*.keras
+*.pt
+*.pth
+*.onnx
+
+# ==================================================
+# Keep important reproducibility artifacts
+# (DO NOT IGNORE THESE)
+# ==================================================
+!src/ml/artifacts/feature_cols.json
+!src/ml/artifacts/cleaning_report.json
+!src/ml/IMPLEMENTATION_CHECKLIST.md
+!src/ml/REFACTOR_SUMMARY.md
