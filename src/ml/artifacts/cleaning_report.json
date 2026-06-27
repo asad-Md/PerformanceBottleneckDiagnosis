@@ -1,0 +1,17 @@
+{
+  "original_rows": 354344,
+  "removed_rows": 174452,
+  "retained_rows": 179892,
+  "per_class_counts": {
+    "0": 178936,
+    "1": 878,
+    "2": 71,
+    "3": 7
+  },
+  "filters": {
+    "pid": "> 0",
+    "ctx_switches": ">= 3",
+    "latency_count": ">= 3",
+    "total_runtime_ns": "> 0"
+  }
+}

@@ -3,9 +3,34 @@
 **/venv/
 **/.venv/
 
-# Python
+# Local Python installation used by Codex
+.tools/
+
+# Python cache
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
 
+# Jupyter outputs
+*.executed.ipynb
+
+# IDE
+.vscode/
+.idea/
+
+# Test folders
 **/testers/**
 src/approach3/testers/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Generated ML artifacts (can be regenerated)
+src/ml/artifacts/*.png
+src/ml/artifacts/*.csv
+
+# Optional: don't commit notebook outputs
+*.nbconvert.ipynb
