@@ -69,3 +69,33 @@
 
 - Installing the full `jupyter` meta-package initially failed because Windows long-path support blocked a JupyterLab asset path. The required notebook execution dependencies were installed separately, and notebooks executed successfully through `nbclient` and `ipykernel`.
 - Scikit-learn emitted class-distribution warnings during validation because rare classes are absent from some validation splits while predictions may include them. The runs completed and artifacts were regenerated.
+
+## Phase 3 - Ordinal Classification
+
+- [x] Added `src/ml/evaluation/ordinal_metrics.py`.
+- [x] Added `ordinal_metrics(y_true, y_pred)`.
+- [x] Added `src/ml/models/ordinal.py`.
+- [x] Used only `strategy_c_quantile_min_size` labels.
+- [x] Used leakage-free `numeric_feature_columns(include_leakage=False)`.
+- [x] Used `GroupKFold(n_splits=5)` grouped by `session_label`.
+- [x] Implemented RandomForestRegressor regression-as-ordinal baseline.
+- [x] Implemented HistGradientBoostingRegressor regression-as-ordinal baseline.
+- [x] Implemented cumulative binary RandomForestClassifier thresholds for `y > 0`, `y > 1`, and `y > 2`.
+- [x] Implemented nominal argmax probability baseline.
+- [x] Implemented expected ordinal distance probability post-processing.
+- [x] Generated `src/ml/artifacts/ordinal_comparison.csv`.
+- [x] Generated `src/ml/artifacts/ordinal_summary.md`.
+- [x] Generated `src/ml/artifacts/ordinal/ordinal_confusion_matrix.csv`.
+- [x] Generated `src/ml/artifacts/ordinal/ordinal_confusion_matrix.png`.
+- [x] Generated `src/ml/artifacts/ordinal/ordinal_error_distribution.png`.
+- [x] Created `src/ml/notebooks/03_ordinal_classification.ipynb`.
+- [x] Executed `src/ml/notebooks/03_ordinal_classification.ipynb`.
+
+## Phase 3 Runtime Evidence
+
+- Command: `.tools/python312/python.exe -m ml.models.ordinal --input-csv src/approach3/perf_metrics.csv --artifact-dir src/ml/artifacts`
+- Executed notebook output: `src/ml/notebooks/03_ordinal_classification.executed.ipynb`
+- Best overall Macro F1: `RandomForestClassifier` with `nominal_argmax`, Macro F1 `0.4922`.
+- Best ordinal-only Macro F1: `CumulativeRandomForestClassifier` with `cumulative_binary`, Macro F1 `0.4893`.
+- Lowest mean absolute error: `HistGradientBoostingRegressor` with `regression_as_ordinal`, MAE `0.6972`.
+- Runtime notes: joblib emitted a non-fatal Windows physical-core detection warning; notebook execution emitted non-fatal nbformat/ZMQ/kernel transport warnings.
