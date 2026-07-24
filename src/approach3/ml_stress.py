@@ -50,7 +50,7 @@ def run_llm(model_name="gpt2-medium", batch_size=32, seq_len=512, workers=16, ep
     model.train()
 
     log("Loading WikiText-103 (raw) — first run will download ~500MB")
-    ds = load_dataset("wikitext", "wikitext-103-raw-v1", split="train")
+    ds = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", split="train")
     ds = ds.filter(lambda x: len(x["text"].strip()) > 200)
 
     def tokenize(batch):
