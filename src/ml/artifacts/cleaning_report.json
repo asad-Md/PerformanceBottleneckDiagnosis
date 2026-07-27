@@ -1,12 +1,12 @@
 {
-  "original_rows": 354344,
-  "removed_rows": 174452,
-  "retained_rows": 179892,
+  "original_rows": 267237,
+  "removed_rows": 119643,
+  "retained_rows": 147594,
   "per_class_counts": {
-    "0": 178936,
-    "1": 855,
-    "2": 81,
-    "3": 20
+    "0": 146656,
+    "1": 860,
+    "2": 71,
+    "3": 7
   },
   "filters": {
     "pid": "> 0",

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import joblib
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -15,7 +16,7 @@ if str(ROOT) not in sys.path:
 from ml.features.engineering import engineer_features
 
 from .config import RealtimeConfig, load_config
-from .utils import load_feature_columns, run_bpftool_dump
+from .utils import run_bpftool_dump
 
 
 class RealtimeReader:
@@ -65,13 +66,16 @@ class RealtimeReader:
         "max_rwsem_write_wait_ns",
         "session_label",
     ]
-
+    
     def __init__(self, config: RealtimeConfig | None = None) -> None:
         self.config = config or load_config()
         self.debug_enabled = os.getenv("REALTIME_DEBUG", "").lower() in {"1", "true", "yes", "on"}
-        self.feature_cols = load_feature_columns(self.config.feature_cols_path)
-        if not self.feature_cols:
-            raise RuntimeError("feature_cols.json could not be loaded")
+
+        # Load trained model
+        self.model = joblib.load(self.config.model_path)
+
+        # Exact feature list used during training
+        self.model_features = list(self.model.feature_names_in_)
 
     def _log_debug(self, message: str) -> None:
         if self.debug_enabled:
@@ -89,19 +93,35 @@ class RealtimeReader:
         if not isinstance(entry, dict):
             return {}, {}
 
-        if "key" in entry:
+        # Prefer bpftool's decoded representation
+        if "formatted" in entry:
+            formatted = entry.get("formatted", {})
+            key_payload = formatted.get("key", {})
+            value_payload = formatted.get("value", {})
+
+        elif "key" in entry:
             key_payload = entry.get("key", {})
             value_payload = entry.get("value", {})
+
         else:
-            key_payload = {"pid": entry.get("pid"), "cpu": entry.get("cpu")}
+            key_payload = {
+                "pid": entry.get("pid"),
+                "cpu": entry.get("cpu"),
+            }
             value_payload = entry.get("value", entry)
 
-        if isinstance(key_payload, list):
-            pid = int(key_payload[0]) if len(key_payload) > 0 else 0
-            cpu = int(key_payload[1]) if len(key_payload) > 1 else 0
-        elif isinstance(key_payload, dict):
+        if isinstance(key_payload, dict):
             pid = int(key_payload.get("pid", 0) or 0)
             cpu = int(key_payload.get("cpu", 0) or 0)
+
+        elif isinstance(key_payload, list):
+            # Fallback for older JSON layouts
+            try:
+                pid = int(key_payload[0], 16) if len(key_payload) > 0 else 0
+                cpu = int(key_payload[1], 16) if len(key_payload) > 1 else 0
+            except Exception:
+                return {}, {}
+
         else:
             return {}, {}
 
@@ -320,22 +340,39 @@ class RealtimeReader:
             self._log_debug("first reconstructed row: " + json.dumps(rows_df.iloc[0].to_dict(), default=str))
 
         featured_df = engineer_features(rows_df, artifact_dir=None)
-        missing_features = [column for column in self.feature_cols if column not in featured_df.columns]
+
+        # Verify every feature expected by the trained model exists
+        missing_features = [
+            column
+            for column in self.model_features
+            if column not in featured_df.columns
+        ]
+
         if missing_features:
             raise RuntimeError(
-                "Engineered feature DataFrame is missing feature_cols.json entries: " + ", ".join(missing_features)
+                "Realtime feature matrix is missing model features: "
+                + ", ".join(missing_features)
             )
 
-        feature_frame = featured_df.loc[:, self.feature_cols].copy()
-        self._log_debug("first engineered feature row: " + json.dumps(feature_frame.iloc[0].to_dict(), default=str))
-        self._log_debug(f"feature matrix shape: {feature_frame.shape}")
-        return {"rows": rows_df, "features": feature_frame}
+        # Select exactly the columns the model was trained on
+        feature_frame = featured_df.loc[:, self.model_features].copy()
 
+        self._log_debug(f"featured dataframe columns: {len(featured_df.columns)}")
+        self._log_debug(f"model expects {len(self.model_features)} features")
+        self._log_debug(
+            "first model feature row: "
+            + json.dumps(feature_frame.iloc[0].to_dict(), default=str)
+        )
+        self._log_debug(f"feature matrix shape: {feature_frame.shape}")
+
+        return {
+            "rows": rows_df,
+            "features": feature_frame,
+        }
 
 def main() -> None:
     reader = RealtimeReader()
     reader.read_once()
-
 
 if __name__ == "__main__":
     main()

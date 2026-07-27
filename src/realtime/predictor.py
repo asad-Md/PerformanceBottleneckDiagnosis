@@ -27,7 +27,7 @@ class Predictor:
 
         import joblib
 
-        self.model = joblib.load(self.config.model_path)
+        self.model = self.reader.model
 
     def run_forever(self) -> None:
         while True:
