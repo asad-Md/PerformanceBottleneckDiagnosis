@@ -30,12 +30,13 @@ def load_config() -> RealtimeConfig:
     cfg.lock_map_path = os.getenv("REALTIME_LOCK_MAP", f"{cfg.pin_base}/lock_map")
 
     model_candidates = [
-        os.getenv("REALTIME_MODEL_PATH", ""),
-        str(approach3 / "rf_bottleneck_classifier.pkl"),
-        str(approach3 / "xgb_bottleneck_classifier.pkl"),
-        str(root / "ml" / "artifacts" / "rf_bottleneck_classifier.pkl"),
-        str(root / "ml" / "artifacts" / "xgb_bottleneck_classifier.pkl"),
+    os.getenv("REALTIME_MODEL_PATH", ""),
+    str(root / "ml" / "artifacts" / "rf_bottleneck_classifier.pkl"),
+    str(root / "ml" / "artifacts" / "xgb_bottleneck_classifier.pkl"),
+    str(approach3 / "rf_bottleneck_classifier.pkl"),
+    str(approach3 / "xgb_bottleneck_classifier.pkl"),
     ]
+    
     for candidate in model_candidates:
         if candidate and os.path.exists(candidate):
             cfg.model_path = candidate

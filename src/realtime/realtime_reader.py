@@ -74,6 +74,9 @@ class RealtimeReader:
         # Load trained model
         self.model = joblib.load(self.config.model_path)
 
+        print(f"Loaded model: {self.config.model_path}")
+        print(f"Model expects {len(self.model.feature_names_in_)} features")
+
         # Exact feature list used during training
         self.model_features = list(self.model.feature_names_in_)
 

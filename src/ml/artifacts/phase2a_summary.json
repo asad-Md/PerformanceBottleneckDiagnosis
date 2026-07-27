@@ -1,7 +1,0 @@
-{
-  "class_analysis": "src\\ml\\artifacts\\class_analysis.csv",
-  "imbalance_comparison": "src\\ml\\artifacts\\imbalance_comparison.csv",
-  "class_weight_model_comparison": "src\\ml\\artifacts\\class_weight_model_comparison.csv",
-  "best_imbalance_strategy": "borderline_smote",
-  "best_class_weight_model": "xgboost"
-}
