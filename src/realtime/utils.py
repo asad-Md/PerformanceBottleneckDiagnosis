@@ -43,14 +43,28 @@ def make_map_key(pid: int, cpu: int) -> tuple[int, int]:
     return (pid, cpu)
 
 
-def load_feature_columns(path: str | Path | None) -> list[str]:
+def load_json(path: str | Path | None, description: str = "JSON file") -> Any:
+    """Generic JSON loader used for the v5 artifacts (feature_cols_v5.json, label_thresholds_v5.json)."""
     if not path:
-        raise RuntimeError("Missing feature_cols.json path")
-    feature_path = Path(path)
-    if not feature_path.exists():
-        raise RuntimeError(f"Missing feature_cols.json: {feature_path}")
-    with feature_path.open("r", encoding="utf-8") as handle:
-        data = json.load(handle)
+        raise RuntimeError(f"Missing path for {description}")
+    json_path = Path(path)
+    if not json_path.exists():
+        raise RuntimeError(f"Missing {description}: {json_path}")
+    with json_path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def load_feature_columns(path: str | Path | None) -> list[str]:
+    data = load_json(path, description="feature_cols_v5.json")
     if not isinstance(data, list) or not data:
-        raise RuntimeError(f"feature_cols.json is empty or malformed: {feature_path}")
+        raise RuntimeError(f"feature_cols_v5.json is empty or malformed: {path}")
     return [str(item) for item in data]
+
+
+def load_label_thresholds(path: str | Path | None) -> dict[str, float]:
+    """Loads label_thresholds_v5.json -> {'p50': ..., 'p85': ..., 'p97': ...} (informational only;
+    the champion model already encodes these boundaries, so this is for logging/inspection, not inference)."""
+    data = load_json(path, description="label_thresholds_v5.json")
+    if not isinstance(data, dict):
+        raise RuntimeError(f"label_thresholds_v5.json is malformed: {path}")
+    return {str(k): float(v) for k, v in data.items()}

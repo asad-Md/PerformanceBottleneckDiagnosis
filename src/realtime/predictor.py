@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import sys
 import time
@@ -9,11 +8,11 @@ from pathlib import Path
 
 try:
     from .config import RealtimeConfig, load_config
-    from .realtime_reader import RealtimeReader
+    from .realtime_reader import RealtimeReader, CLASS_NAMES, BOTTLENECK_CLASS
 except ImportError:  # pragma: no cover - direct-script fallback
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from realtime.config import RealtimeConfig, load_config
-    from realtime.realtime_reader import RealtimeReader
+    from realtime.realtime_reader import RealtimeReader, CLASS_NAMES, BOTTLENECK_CLASS
 
 
 class Predictor:
@@ -25,42 +24,32 @@ class Predictor:
         if not self.config.model_path or not os.path.exists(self.config.model_path):
             raise RuntimeError(f"Missing model for realtime inference: {self.config.model_path}")
 
-        import joblib
-
         self.model = self.reader.model
 
     def run_forever(self) -> None:
         while True:
-            result = self.reader.read_once()
-            feature_frame = result["features"]
-            predictions = self.model.predict(feature_frame)
-
-            probabilities = None
-            if hasattr(self.model, "predict_proba"):
-                probabilities = self.model.predict_proba(feature_frame)
+            result = self.reader.predict()
+            predictions = result["predictions"]
+            probabilities = result["probabilities"]
+            rows_df = result["rows"]
 
             payload = []
-
-            LABELS = {
-                "0": "CPU_BOUND",
-                "1": "MEMORY_BOUND",
-                "2": "IO_BOUND",
-                "3": "LOCK_CONTENTION",
-            }
-
-            for index, row in result["rows"].iterrows():
-
-                prediction = str(predictions[index])
+            # Iterate positionally — predictions/probabilities are plain numpy arrays aligned
+            # with rows_df's row order, not with rows_df's pandas index.
+            for position, (_, row) in enumerate(rows_df.iterrows()):
+                pred_class = int(predictions[position])
 
                 confidence = None
                 if probabilities is not None:
-                    confidence = max(probabilities[index]) * 100
+                    confidence = float(max(probabilities[position]) * 100)
 
                 payload.append({
                     "pid": int(row["pid"]),
                     "cpu": int(row["cpu"]),
                     "comm": str(row.get("comm", "") or "-"),
-                    "prediction": LABELS.get(prediction, prediction),
+                    "pred_class": pred_class,  # raw 0/1/2/3 stall-severity class
+                    "prediction": CLASS_NAMES.get(pred_class, str(pred_class)),
+                    "is_bottleneck": pred_class == BOTTLENECK_CLASS,
                     "confidence": confidence,
                 })
 
@@ -70,30 +59,34 @@ class Predictor:
                 reverse=True,
             )
 
-            print("\n" + "=" * 72)
-            print(f"Prediction Time : {datetime.now().strftime('%H:%M:%S')}")
-            print("=" * 72)
-            print(f"{'PID':<8}{'CPU':<6}{'PROCESS':<22}{'PREDICTION':<20}{'CONF'}")
-            print("-" * 72)
+            bottleneck_count = sum(1 for item in payload if item["is_bottleneck"])
 
-            for item in payload[:15]:          # Show top 15 only
+            print("\n" + "=" * 80)
+            print(f"Prediction Time : {datetime.now().strftime('%H:%M:%S')}")
+            print("=" * 80)
+            print(f"{'PID':<8}{'CPU':<6}{'PROCESS':<22}{'CLASS':<7}{'PREDICTION':<20}{'CONF'}")
+            print("-" * 80)
+
+            for item in payload[:15]:  # Show top 15 only
                 conf = (
                     f"{item['confidence']:.1f}%"
                     if item["confidence"] is not None
                     else "-"
                 )
+                marker = " <-- BOTTLENECK" if item["is_bottleneck"] else ""
 
                 print(
                     f"{item['pid']:<8}"
                     f"{item['cpu']:<6}"
                     f"{item['comm'][:20]:<22}"
+                    f"{item['pred_class']:<7}"
                     f"{item['prediction']:<20}"
-                    f"{conf}"
+                    f"{conf}{marker}"
                 )
 
-            print("-" * 72)
-            print(f"Processes monitored : {len(payload)}")
-            print("=" * 72)
+            print("-" * 80)
+            print(f"Processes monitored : {len(payload)}   |   Bottlenecks (class {BOTTLENECK_CLASS}) : {bottleneck_count}")
+            print("=" * 80)
             time.sleep(self.config.polling_interval_s)
 
 
