@@ -1,11 +1,11 @@
 {
-  "original_rows": 267237,
-  "removed_rows": 119643,
-  "retained_rows": 147594,
+  "original_rows": 526894,
+  "removed_rows": 215793,
+  "retained_rows": 311101,
   "per_class_counts": {
-    "0": 146656,
-    "1": 860,
-    "2": 71,
+    "0": 301969,
+    "1": 8911,
+    "2": 214,
     "3": 7
   },
   "filters": {

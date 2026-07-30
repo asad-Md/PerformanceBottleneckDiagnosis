@@ -1,0 +1,5 @@
+method,hungarian_accuracy,ARI,NMI,homogeneity,completeness,v_measure
+KMeans (k=4),0.664,-0.038,0.01,0.012,0.008,0.01
+GMM (k=4),0.65,-0.039,0.01,0.013,0.008,0.01
+Agglomerative (k=4),0.589,-0.016,0.005,0.007,0.004,0.005
+DBSCAN,0.423,0.004,0.023,0.046,0.015,0.023

@@ -1,0 +1,543 @@
+original latex
+
+
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+% The preceding line is only needed to identify funding in the first footnote. If that is unneeded, please comment it out.
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithm,algorithmic}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+\IEEEoverridecommandlockouts\IEEEpubid{\makebox[\columnwidth]{ 979-8-3503-3439-5/23/\$31.00 ©2023 
+IEEE \hfill} \hspace{\columnsep}\makebox[\columnwidth]{ }}
+\begin{document}
+
+\title{Text Classification using Machine Learning Algorithms on Encrypted Data}
+
+
+
+
+\author{\IEEEauthorblockN{ Sagarika Behera}
+\IEEEauthorblockA{\textit{Dept. of Computer Sc. and Engineering} \\
+\textit{CMR Institute of Technology}\\
+Bengaluru, India \\
+sagarika.b@cmrit.ac.in}
+\and
+\IEEEauthorblockN{ Mohammed Asadullah}
+\IEEEauthorblockA{\textit{Dept. of Computer Sc. and Engineering} \\
+\textit{CMR Institute of Technology}\\
+Bengaluru, India \\
+moas23cs@cmrit.ac.in}
+\and
+\IEEEauthorblockN{ M Anindita}
+\IEEEauthorblockA{\textit{Dept. of Computer Sc. and Engineering} \\
+\textit{CMR Institute of Technology}\\
+Bengaluru, India \\
+anm23cs@cmrit.ac.in}
+\and
+\IEEEauthorblockN{ Yogish M}
+\IEEEauthorblockA{\textit{Dept. of Computer Sc. and Engineering} \\
+\textit{CMR Institute of Technology}\\
+Bengaluru, India \\
+myog19cs@cmrit.ac.in}
+\and
+\IEEEauthorblockN{}
+\IEEEauthorblockA{\textit{} \\
+\textit{}\\
+ \\
+}
+\and
+\IEEEauthorblockN{}
+\IEEEauthorblockA{\textit{} \\
+\textit{}\\
+ \\
+}
+\and
+\IEEEauthorblockN{}
+\IEEEauthorblockA{\textit{} \\
+\textit{}\\
+ \\
+}
+\and
+\IEEEauthorblockN{}
+\IEEEauthorblockA{\textit{} \\
+\textit{}\\
+ \\
+}
+\and
+\IEEEauthorblockN{}
+\IEEEauthorblockA{\textit{} \\
+\textit{}\\
+ \\
+}
+\and
+\IEEEauthorblockN{}
+\IEEEauthorblockA{\textit{} \\
+\textit{}\\
+ \\
+}
+\and
+\IEEEauthorblockN{}
+\IEEEauthorblockA{\textit{} \\
+\textit{}\\
+ \\
+}
+\and
+\IEEEauthorblockN{}
+\IEEEauthorblockA{\textit{} \\
+\textit{}\\
+ \\
+}
+\and
+\IEEEauthorblockN{}
+\IEEEauthorblockA{\textit{} \\
+\textit{}\\
+ \\
+}
+\and
+\IEEEauthorblockN{}
+\IEEEauthorblockA{\textit{} \\
+\textit{}\\
+ \\
+}
+\and
+\IEEEauthorblockN{}
+\IEEEauthorblockA{\textit{} \\
+\textit{}\\
+ \\
+}
+\and
+\IEEEauthorblockN{}
+\IEEEauthorblockA{\textit{} \\
+\textit{}\\
+ \\
+}
+\and
+\IEEEauthorblockN{ Jhansi Rani Prathuri}
+\IEEEauthorblockA{\textit{Dept. of Computer Sc. and Engineering} \\
+\textit{CMR Institute of Technology}\\
+Bengaluru, India \\
+jhansirani.p@gmail.com}
+
+}
+
+\maketitle
+
+\begin{abstract}
+Modern multicore systems frequently suffer from performance bottlenecks caused by resource contention, such as runqueue saturation, lock starvation, and memory bandwidth exhaustion. Traditional diagnostic tools often fail to isolate these issues at the process level and introduce significant measurement overhead by relying on userspace polling. To address these challenges, this paper proposes a novel, low-overhead performance monitoring and diagnostic framework using extended Berkeley Packet Filter (eBPF) and machine learning. The system employs eBPF-based kernel instrumentation to capture fine-grained, per-process metrics—including scheduling latency, lock contention, and system call frequencies. By utilizing a decoupled data extraction pipeline with pinned BPF maps, the architecture minimizes the observer effect and accurately derives features for machine learning analysis. Using models such as Random Forest and XGBoost, the framework classifies bottleneck severity into actionable categories. Ultimately, this shift to process-level analysis avoids signal distortion and empowers developers to accurately pinpoint resource contention and optimize system performance in real time.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Extended Berkeley Packet Filter, Machine Learning, Performance Bottleneck, Multicore Systems, Kernel Instrumentation, System Observability, Process-Level Diagnosis.
+\end{IEEEkeywords}
+
+\section{Introduction}\label{sec1}
+The emergence of multicore processor architectures relies heavily on parallel execution via preemptive multitasking. However, this parallelism introduces unique performance pathologies, including runqueue saturation, memory bandwidth exhaustion, lock starvation, and cache thrashing. When resource saturation occurs, CPU-bound workloads cause elevated runqueue wait times for co-scheduled processes, which manifests as sluggish response times and increased tail latency for end users.
+
+
+Contemporary multicore systems lack effective, low-overhead mechanisms for diagnosing these performance bottlenecks. Traditional polling tools often introduce significant measurement overhead and only provide system-wide aggregates, failing to identify root causes at the process level. Furthermore, current machine learning approaches struggle with inaccurate training labels, clock synchronization errors, and signal dilution caused by aggregating diverse system data.
+
+ This project addresses these critical deficiencies by introducing a low-overhead Linux kernel instrumentation system utilizing extended Berkeley Packet Filter (eBPF). The framework combines in-kernel observation with machine learning techniques to offer a precise method for detecting and classifying performance bottlenecks at the process level.
+
+ The primary objectives of this research include designing an eBPF system to capture fine-grained process performance metrics without continuous userspace polling. Furthermore, the project aims to develop an efficient kernel-to-userspace data pipeline that minimizes observer effect by collecting metrics in pinned BPF maps and retrieving them only at the end of execution. Another goal is building an automated framework that generates a large, diverse dataset across multiple workload types. Additionally, the research focuses on developing a machine learning pipeline utilizing Random Forest and XGBoost to classify system bottlenecks based on engineered features and robust training techniques. Finally, the framework shifts from session-level to process-level analysis to ensure the model learns meaningful kernel-level behavior and provides actionable, root-cause insights.
+
+ By accurately diagnosing resource contention early, this approach enables developers and system administrators to optimize application performance and ensure the reliable operation of large, high-performance infrastructures.
+
+
+\begin{figure}[!htbp]
+\centering
+\centerline{\includegraphics[width=9cm, height=8cm]{Fig1a.png}}
+\caption{Homomorphic Encryption Process}
+\label{fig1}
+\end{figure}
+
+
+
+There are various machine learning algorithms available for text classification, including logistic regression, decision trees, and support vector machines (SVMs). These algorithms are applicable to build a model that maps the features of a text document to its corresponding category. The authors of the paper \cite{b9} briefly explained how machine learning algorithms are applicable to encrypted data. 
+
+
+To perform text classification on encrypted data, we need to use homomorphic encryption techniques to encrypt the text documents and the model parameters. Then, we can use homomorphic operations to perform the computations required for text classification.
+
+
+One of the challenges of performing text classification on encrypted data is the computational overhead associated with homomorphic encryption. Homomorphic operations are computationally intensive and can significantly slow down text classification. However, recent advancements in homomorphic encryption techniques have significantly reduced the computational overhead, making it possible to perform text classification on ciphertext with reasonable efficiency.
+
+An example of natural language processing is sentiment analysis, commonly referred to as an opinion mining technique used in order to gauge the mood broadly or emotion expressed in a piece of text, such as a review, tweet, or article. The author of the paper \cite{b10} explains how these tweets or opinions can help doctors to analyze patients' behavior and mental health condition with the help of NLP.   
+
+Automatically categorizing a text's sentiment as good, negative, or neutral is the aim of sentiment analysis. This can be done using a variety of methods, including machine learning algorithms, lexicon-based approaches, and rule-based systems. The authors of the paper \cite{b11} have done a detailed analysis of fake news on COVID-19 data using various machine learning and deep learning algorithms.
+
+To identify false information on COVID-19, a model is proposed in the paper \cite{b12}. Ten ML algorithms are used with seven methods of feature extraction for detecting the truth of the message. 
+
+Sentiment analysis has many applications, including market research, social media monitoring, and customer feedback analysis. For example, businesses can use sentiment analysis to monitor online reviews and social media posts to gain insights into customer opinions and preferences. It can also be used to identify and respond to negative feedback in real-time, improving customer satisfaction and loyalty.
+
+
+
+In summary, text classification on encrypted data is a promising area of research that combines the benefits of machine learning and cryptography to protect the privacy and confidentiality of sensitive text data. With the advancements in homomorphic encryption techniques, it is now possible to perform text classification on encrypted data with reasonable efficiency.
+
+\textbf{Outline of the paper:}
+Section \ref{sec1} of the paper gives a brief introduction to text analysis, homomorphic encryption methods, and sentiment analysis. The related work in this area is described in section \ref{sec2}. We have used different machine-learning algorithms for text analysis, TF-IDF for text mining, and RSA algorithm for an encryption operation in our work. The proposed method for our research work and the system architecture is given in section \ref{sec3}. We have implemented it using Python and calculated the percentage of accuracy for different classification algorithms and the result is tabulated and also plotted as a graph given in section \ref{sec4}. Finally, we have concluded our research work with the scope for future work in section \ref{sec5}.
+
+\section{Relevant Work}\label{sec2}
+The field of sentiment analysis is expanding quickly, and researchers continue to develop new techniques and tools to improve accuracy and applicability. As the volume of online data continues to grow, sentiment analysis is likely to become an increasingly important tool for businesses and organizations looking to gain insights into customer sentiment and improve their overall performance.
+The authors of the paper \cite{b13} have done research on sentiment analysis for emotions along with text on airline databases. They found that the deep learning method is better than ML algorithms for classification.
+
+
+The primary goal of the study \cite{b14} is to implement a privatization mechanism and text classification for word embedding to prevent leakage of information. PrivFT seeks to operate all neural network computations in an encrypted manner. BERT Embedding-based Method It makes use of fastText for this. This includes a two-layer network, an embedding layer, and bag-of-words vectors as its input. PrivFT, on the other hand, does not make use of pre-training; as a result, the classifier and embedding matrix must be modified from scratch, and training on a single dataset takes a long time.
+
+Paper \cite{b15} discusses automatically extracting information and categorizing articles based on suitable topics. Text Classification Algorithms like K- Nearest Neighbors, Naive Bayes, and Support Vector Machine were used. The results of each classification algorithm were compared. This paper also describes the steps involved in article classification. KNN performs better with fewer features. When the number of features increases it leads to an increase in dimension, thus leading to the problem of overfitting. 
+
+By comparing our system's performance on a sentiment classification job on the IMDb movie review dataset to a plaintext implementation, Paper \cite{b16} demonstrates that RNNs can be used over encrypted data without suffering any loss in accuracy. is a completely connected layer that has SoftMax activation on two units. Keras is used to do the training, which results in 86.47\% accuracy on the test data that hasn't been seen. The encrypted data is accurate to the same degree.
+
+The method and approach used in Paper \cite{b17} to homomorphically encrypt the heart disease medical dataset and apply the KNN machine learning algorithm to the encrypted dataset are presented. Homomorphic encryption can be effectively utilized to protect the privacy of data in the cloud since it allows processing to happen while the data is protected. 
+
+\section{Proposed Method} \label{sec3}
+The architecture of the suggested method to safely store data in the cloud is thoroughly described in this section. The suggested technique provides a practical way to protect cloud-based data. Machine learning algorithms can be applied to the encrypted dataset for classification. 
+\subsection{System Architecture} \label{ss4.1}
+The system architecture is shown in figure \ref{fig2}  for the suggested model. A movie review dataset is taken as the input for this proposed model. First, the data set is cleaned by eliminating stop words and performing stemming, lemmatization, and tokenization. Later, the data is classified using different classification algorithms such as Naïve Bayes classifier, K Nearest Neighbor, Decision Tree, Logistic Regression, Random Forest, and Support Vector machine. The output is stored as a result1. Then an encryption algorithm like RSA is applied to the plain text and ciphertext is produced. This ciphertext is stored in another CSV file (the ciphertext is in the form of numbers). All the classification algorithms are also used on the encrypted data, and this outcome is stored as result 2. Now, both the outputs stored in result 1 and result 2 are compared and visualized.
+
+\begin{figure}[!htbp]
+\centering
+\centerline{\includegraphics[width=9cm, height=6cm]{Fig2a.png}}
+\caption{ Design Architecture for the Proposed Model}
+\label{fig2}
+\end{figure}
+
+\subsection{Methodology of the Proposed System} \label{ss4.2}
+The suggested solution is based on the use of homomorphic encryption, where we encrypt a selected dataset using the RSA technique because it has homomorphic features and the results are stored in a file. Here, we make use of the Kaggle dataset of movie reviews.
+
+The classification algorithms are then used on the encrypted data that has been stored to produce predictions using the input features as a variety of factors and the target variable as a binary variable.
+
+The output is now saved in a file, and the RSA technique is used to decode it. The dataset is taken from Kaggle, and Python is used to implement both the RSA and classification algorithms.
+In order to retrieve the output and save it in a file, we next apply the same classification method to the original data without encrypting it. Two findings have been obtained; at this point, we compare them and visualize the same. The data flow diagram is shown in figure \ref{fig3}. 
+
+
+
+\begin{figure}[!htbp]
+\centering
+\centerline{\includegraphics[width=8cm, height=8cm]{Fig3a.png}}
+\caption{ Data Flow Diagram}
+\label{fig3}
+\end{figure}
+
+\section{Implementation and Result} \label{sec4}
+The work includes employing a dataset of movie reviews, as the project's input. The dataset is collected from the Kaggle website. The dataset has 2 columns which are sentiment and review. The sentiment contains sentences explaining the user's feedback or comment which is text data and the review column contains binary values  i.e 0 or 1, where 1 represents a positive review while the value 0 represents a negative review. The data set is cleaned by removing stop words and performing stemming, lemmatization, and tokenization. The results are obtained and saved  as a result 1 when the data is classified later using various classifiers. The plain text is then subjected to an encryption scheme like RSA, and ciphertext is produced. Another CSV file is used to store the ciphertext (the ciphertext is in the form of numbers). On the encrypted data again various classification algorithms were applied, and the outcome is saved  as result 2. Both the results are compared and analyzed.
+
+We consider the same movie review dataset. We mainly focus on encrypting the Sentiment part of the movie review dataset. To perform encryption we take each sentence, then we extract each word from the sentence. Now further every alphabet is taken and converted into its ASCII code which is then encrypted. Next, each of these encrypted alphabets is combined together to create an encrypted word, the encrypted words are further combined to form an encrypted sentence.
+
+Since our model is a binary classifier, where 1 represents positive feedback and 0 represents negative feedback, we have calculated the Recall, Precision, F1 score, and AUC (Area Under the ROC Curve) value to measure the performance of the model. This metric value is tabulated and shown in table \ref{table3}.
+
+\begin{table}[htbp]
+
+\caption{Machine Learning-based Classification Result}
+\label{table3}
+\setlength{\tabcolsep}{0.1pt}
+\begin{tabular}{|p{30pt}|p{30pt}|p{30pt}|p{30pt}|p{25pt}|p{30pt}|p{30pt} |p{30pt} |p{25pt}|}
+\hline
+
+Algorithm  & Precision
+(Without Encryption)
+  & Precision (With
+Encryption) &  Recall
+(Without Encryption)
+  & Recall (With
+Encryption) &  F1 Score
+(Without Encryption)
+  & F1 Score(With
+Encryption)
+& AUC
+(Without Encryption)
+  & AUC (With
+Encryption)
+ \\
+\hline
+
+Logistic Regression   & $0.81$   & $0.63$  & $0.77$ & $0.53$ & $0.72$ & $0.45$ & $0.86$ & $0.65$
+   \\
+\hline
+Random Forest    & $0.88$   & $0.85$  & $0.83$ & $0.71$ & $0.8$ & $0.7$  & $0.88$ & $0.67$ \\
+\hline
+SVM    & $0.76$   & $0.56$  & $0.77$ & $0.56$ & $0.72$ & $0.56$ & $0.89$ & $0.7$    \\
+
+\hline
+Naive Bayes    & $0.77$   & $0.28$  & $0.67$ & $0.5$ & $0.57$ & $0.36$ & $0.87$ & $0.68$     \\
+\hline
+Decision Tree   & $0.75$   & $0.7$  & $0.76$ & $0.7$ & $0.72$ & $0.7$ & $0.76$  & $0.7$  \\
+\hline
+KNN   & $0.66$   & $0.43$  & $0.62$ & $0.45$ & $0.47$ & $0.43$  & $0.79$  & $0.49$ \\
+\hline
+\end{tabular}
+\label{tab1}
+\end{table}
+\subsection{Algorithms } \label{ss 5.1}
+The algorithms that the model uses are described in this section. In order to fulfill the numerous functional and non-functional needs of the suggested scheme, the model uses these methods.
+
+Several techniques, including Logistic Regression, Random Forest, Naive Bayes, Decision Tree, K Nearest Neighbor, and Support Vector Machine for Comparison, are used to achieve the proposed system.
+
+
+The steps involved in all these ML algorithms for the classification of data are explained in this section. Algorithm \ref{alg4} explains the steps involved in Logistic Regression for calculating the accuracy score. Similarly, algorithm \ref{alg5} shows the steps for the Random Forest method, algorithm \ref{alg6} explains the Naive Bayes method, algorithm \ref{alg7} shows the steps for the Decision tree method, algorithm \ref{alg8} is for Support Vector Machine, and algorithm \ref{alg9} is for KNN classifier to calculate the accuracy score.
+
+\begin{algorithm}
+\caption{Logistic Regression Algorithm}\label{alg4}
+\begin{algorithmic}[1]
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+ \renewcommand{\algorithmicensure}{\textbf{Output:}}
+\REQUIRE $X_{train}, X_{test}, Y_{train}, Y_{test}$ 
+   
+  
+\ENSURE  Accuracy Score   
+\STATE Import LogisticRegression into the sklearn.linear model package.   
+\STATE  LogisticRegression() assigned to the lr variable in order to categorize the dataset.  
+\STATE Send the $X_{train}$ and $Y_{train}$ training data to the selected algorithm to fit it.
+\STATE The following step is to create predictions based on the test results from $X_{test}$.
+\STATE The accuracy score is calculated by importing the accuracy score from sklearn. metrics. Passing the anticipated data and testing data $Y_{test}$, the accuracy score will be determined.
+\STATE Depending on the accuracy score, we can experiment with changing the algorithm to raise the accuracy score.
+\RETURN Accuracy Score   
+
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}
+\caption{Random Forest Algorithm}\label{alg5}
+\begin{algorithmic}[1]
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+ \renewcommand{\algorithmicensure}{\textbf{Output:}}
+\REQUIRE $X_{train}, X_{test}, Y_{train}, Y_{test}$ 
+   
+     
+\ENSURE Accuracy Score   
+\STATE Import the RandomForestClassifier classifier from sklearn.ensemble   
+\STATE  In order to categorize the dataset, we set max accuracy to 0.  
+\STATE Send the training data $X_{train}$ and $Y_{train}$ to the loop that will suit the chosen method with an $x$ range of 2000.
+\STATE The following step is to create predictions based on the test results from $X_{test}$.
+\STATE The accuracy score is calculated by importing the accuracy score from sklearn. metrics. Passing the anticipated data and testing data $Y_{test}$, the accuracy score will be determined.
+\STATE Depending on the accuracy score, we can experiment with changing the algorithm to raise the accuracy score.
+\RETURN  Accuracy Score   
+
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}
+\caption{Naive Bayes Algorithm}\label{alg6}
+\begin{algorithmic}[1]
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+ \renewcommand{\algorithmicensure}{\textbf{Output:}}
+\REQUIRE $X_{train}, X_{test}, Y_{train}, Y_{test}$ 
+   
+   
+\ENSURE Accuracy Score   
+\STATE Add GaussianNB to your program using sklearn.naive Bayes   
+\STATE GaussianNB() assigned to the nb variable in order to categorize the dataset. 
+\STATE Send the $X_{train}$ and $Y_{train}$ training data to the selected algorithm to fit it.
+\STATE The following step is to create predictions based on the test results from $X_{test}$.
+\STATE The accuracy score is calculated by importing the accuracy score from sklearn. metrics. Passing the anticipated data and testing data $Y_{test}$, the accuracy score will be determined.
+\STATE Depending on the accuracy score, we can experiment with changing the algorithm to raise the accuracy score.
+\RETURN Accuracy Score   
+
+\end{algorithmic}
+\end{algorithm}
+
+
+
+\begin{algorithm}
+\caption{Decission Tree Algorithm}\label{alg7}
+\begin{algorithmic}[1]
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+ \renewcommand{\algorithmicensure}{\textbf{Output:}}
+\REQUIRE $X_{train}, X_{test}, Y_{train}, Y_{test}$ 
+   
+     
+\ENSURE Accuracy Score   
+\STATE Import the DecisionTreeClassifier classifier from sklearn.tree
+\STATE In order to categorize the dataset, max accuracy is set to be 0.
+\STATE Send the training data $X_{train}$ and $Y_{train}$ to the loop that will suit the chosen algorithm with an $x$ range of 200.
+\STATE The following step is to create predictions based on the test results from $X_{test}$.
+\STATE The accuracy score is calculated by importing the accuracy score from sklearn. metrics. Passing the anticipated data and testing data $Y_{test}$, the accuracy score will be determined.
+\STATE Depending on the accuracy score, we can experiment with changing the algorithm to raise the accuracy score.
+\RETURN Accuracy Score   
+
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}
+\caption{Support Vector Machine Algorithm}\label{alg8}
+\begin{algorithmic}[1]
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+ \renewcommand{\algorithmicensure}{\textbf{Output:}}
+\REQUIRE $X_{train}, X_{test}, Y_{train}, Y_{test}$ 
+   
+     
+\ENSURE Accuracy Score   
+\STATE Import the svm file from Sklearn
+\STATE To categorize the dataset,  the kernel is set to linear and assign svm.SVC() to sv.
+\STATE Send the $X_{train}$ and $Y_{train}$ training data to the selected algorithm to fit it.
+\STATE The following step is to create predictions based on the test results from $X_{test}$.
+\STATE The accuracy score is calculated by importing the accuracy score from sklearn. metrics. Passing the anticipated data and testing data $Y_{test}$, the accuracy score will be determined.
+\STATE Depending on the accuracy score, we can experiment with changing the algorithm to raise the accuracy score.
+\RETURN Accuracy Score   
+
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}
+\caption{K-Nearest Neighbor (KNN) Algorithm}\label{alg9}
+\begin{algorithmic}[1]
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+ \renewcommand{\algorithmicensure}{\textbf{Output:}}
+\REQUIRE $X_{train}, X_{test}, Y_{train}, Y_{test}$ 
+   
+    
+\ENSURE Accuracy Score   
+\STATE Import KNeighbhorsClassifier from the neighborhood. sklearn.
+\STATE To categorize the dataset, we set k neighbors to be 7.
+\STATE Send the $X_{train}$ and $Y_{train}$ training data to the selected algorithm to fit it.
+\STATE The following step is to create predictions based on the test results from $X_{test}$.
+\STATE The accuracy score is calculated by importing the accuracy score from sklearn. metrics. Passing the anticipated data and testing data $Y_{test}$, the accuracy score will be determined.
+\STATE Depending on the accuracy score, we can experiment with changing the algorithm to raise the accuracy score.
+\RETURN Accuracy Score   
+
+\end{algorithmic}
+\end{algorithm}
+\subsection{Result} \label{ss5.2}
+All six machine learning algorithms are applied to the plain text and to the cipher text for classification. Table \ref{table2} shows the accuracy in \%age for encrypted and plain text data.
+
+On the movie review dataset, we applied various machine learning algorithms on the original dataset and on the encrypted dataset. Table \ref{table2} shows the accuracy in percentage for different algorithms. The graphical representation of the accuracy in \%age is shown in figure \ref{fig4}. We calculated the percentage of accuracy difference of each algorithm. It is observed that the Decision Tree algorithm gives less difference. The difference between accuracy without encryption and accuracy with encryption is 5.01\% in the Decision Tree algorithm. We observed that accuracy for all the Classifiers on encrypted data decreased significantly compared to  classification on plain data.
+The highest accuracy for classification on plain text and on the encrypted text was observed by the Random Forest Classifier. 
+
+In this work, we have calculated the time required by each of the machine-learning methods for the classification of the plain text and the ciphertext. The result is tabulated and presented in table \ref{table4}.
+\begin{table}
+
+\caption{Accuracy Comparison Result}
+\label{table2}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{|p{75pt}|p{75pt}|p{115pt}|}
+\hline
+
+Algorithm  & Accuracy in \%age
+(Plain Text)
+  & Accuracy in \%age (Cipher Text)
+ \\
+\hline
+
+Logistic Regression   & $80.6$   & $60.0$
+   \\
+\hline
+Random Forest    & $86.57$ & $75.56$    \\
+\hline
+SVM    & $77.61$     & $57.78$      \\
+
+\hline
+Naive Bayes    & $73.13$     & $57.78$     \\
+\hline
+Decision Tree    & $76.12$  & $71.11$    \\
+\hline
+KNN   & $67.16$  & $48.89$    \\
+\hline
+\end{tabular}
+\label{tab1}
+\end{table}
+
+
+
+
+\begin{table}
+
+\caption{Time Required for Execution}
+\label{table4}
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{|p{65pt}|p{65pt}|p{115pt}|}
+\hline
+
+Algorithm  & Execution Time
+(Plain Text) in msec
+  & Execution Time (Cipher Text) in msec
+ \\
+\hline
+
+Logistic Regression   & $41.65$   & $31.72$
+   \\
+\hline
+Random Forest    & $198.42$ & $169.3$    \\
+\hline
+SVM    & $337.82$     & $40.6$      \\
+
+\hline
+Naive Bayes    & $20.61$     & $3.81$     \\
+\hline
+Decision Tree    & $32.16$  & $17.6$    \\
+\hline
+KNN   & $6.84$  & $2.22$    \\
+\hline
+\end{tabular}
+\label{tab1}
+\end{table}
+\begin{figure}[!htbp]
+\centering
+\centerline{\includegraphics[width=9cm, height=8cm]{Fig4.png}}
+\caption{Accuracy Comparison of the Model for Different classification algorithms}
+\label{fig4}
+\end{figure}
+
+\subsection{Discussions} \label{ss5.3}
+The work includes employing a dataset of movie reviews, as the project’s input. This dataset is collected from the Kaggle website. The data set is cleaned by removing stop words and performing stemming, lemmatization, and tokenization. The results are obtained and saved as a result 1 when the data is classified later using various classifiers. The plain text is then subjected to an encryption scheme like RSA, and ciphertext is produced.
+
+
+Another CSV file is used to store the ciphertext (the ciphertext is a string of numbers). On the encrypted data again various classification algorithms were
+applied, and the outcome is saved as result 2. Both the results are compared and analyzed.
+
+It is observed that the Random Forest algorithm gives better accuracy compared to the other classification algorithms but it took more time for execution. It gives 86.57\% accuracy on plain text and 75.56\% accuracy on ciphertext. But it took 198.42 msec to execute on the plaintext and 169.3 msec to execute on the ciphertext.
+
+Since our model is a binary classifier model, where 0 represents negative feedback and 1 represents positive feedback on movie reviews, we have calculated the performance metric which includes precision, recall, F1 score, and AUC (Area Under the ROC Curve) values for both plain text and ciphertext. We found that the Random Forest method gives better results compared to other ML classifiers. 
+
+
+
+
+
+ 
+\section{Conclusion and Future Work} \label{sec5}
+This project focused on text classification using Natural Language Processing (NLP) techniques on encrypted data. The goal was to explore the feasibility and effectiveness of applying machine learning algorithms to encrypted text while maintaining the privacy and security of the data.
+Through the experimentation process, it was found that the Random Forest classifier yielded promising results for both plain text and encrypted text classification. The model achieved an impressive accuracy of 86.57\% for plain text and 75.56\% for encrypted text. These results indicate that it is possible to perform accurate text classification even when dealing with encrypted data.
+The success of the Random Forest classifier can be attributed to its ability to handle high-dimensional data and capture complex relationships between features. It demonstrates the potential of machine learning algorithms in analyzing encrypted text, thus offering a practical solution for protecting sensitive information while still enabling meaningful analysis.
+
+The future work that needs to be accomplished is to change the encryption technique. The current model is using a partial Homomorphic technique to encrypt the data. 
+
+So, we are planning to implement a Fully Homomorphic Encryption (FHE) scheme like BGV and CKKS. The accuracy will be compared for both schemes. 
+
+
+
+
+
+
+
+
+
+
+\begin{thebibliography}{00}
+\bibitem{b1} C.	Gentry, ``A fully homomorphic encryption scheme,'' PhD thesis, Stanford University, 2009,  
+[Online]. Available:
+\underline{crypto.stanford.edu/craig}.
+\bibitem{b2} V. Vaikuntanathan, ``Computing blindfolded: New developments in fully homomorphic encryption,'' in \emph{2011 IEEE 52nd Annual Symposium on Foundations of Computer Science,} IEEE, pp. 5--16, 2011
+\bibitem{b3} M.Tebaa, S. El Hajji, and A. El Ghazi,  ``Homomorphic encryption method applied to Cloud Computing,''  \emph{2012 National Days of Network Security and Systems,} IEEE, pp. 86--89, 2012.
+\bibitem{b4} M. Alkharji, H. Liu, and C.  Washington, "Homomorphic encryption algorithms and schemes for secure computations in the cloud," \emph{Proceedings of 2016 International Conference on Secure Computing and Technology}, 2016
+\bibitem{b5}C. Gentry, S. Halevi, and N.P Smart, ``Better bootstrapping in fully homomorphic encryption,'' \emph{International Workshop on Public Key Cryptography}, Springer, pp. 1--16, 2012.
+\bibitem{b6} M.Naehrig, K. Lauter,and V.  Vaikuntanathan,  ``Can homomorphic encryption be practical?,'' \emph{Proceedings of the 3rd ACM workshop on Cloud computing security workshop}, pp. 113--124, 2011.
+\bibitem{b7} C. Gentry,  ``Fully homomorphic encryption using ideal lattices,'' \emph{Proceedings of the forty-first annual ACM symposium on Theory of computing}, pp. 169--178, 2009.
+\bibitem{b8} Z.Brakerski and V. Vaikuntanathan, "Efficient fully homomorphic encryp¬tion from (standard) lwe,"\emph{SIAM Journal on Computing}, vol. 43, no. 2, pp. 831--871,  2014.
+\bibitem{b9} S. Behera, J.R, Prathuri,    ``Application of homomorphic encryption in machine learning,'' \emph{2020 2nd PhD Colloquium on Ethically Driven Innovation and Technology for Society (PhD EDITS),}IEEE, pp. 1--2,  2020.
+\bibitem{b10} Rajput, Adil, "Natural language processing, sentiment analysis, and clinical analytics," \emph{Innovation in health informatics}, Elsevier,  pp. 79--97, 2020,   
+\bibitem{b11} Bangyal, Waqas Haider, Qasim, Rukhma, Rehman, Najeeb Ur, Ahmad, Zeeshan, Dar, Hafsa, Rukhsar, Laiqa, Aman, Zahra, and Ahmad, Jamil, "Detection of fake news text classification on COVID-19 using deep learning approaches,"\emph{Computational and mathematical methods in medicine}, Hindawi Limited, pp. 1--14, 2021
+\bibitem{b12} Elhadad, Mohamed K and Li, Kin Fun, and Gebali, Fayez, "Detecting misleading information on COVID-19,"\emph{Ieee Access}, IEEE, Vol. 8, pp. 165201--165215,  2020.
+\bibitem{b13} Ullah, Mohammad Aman, Marium, Syeda Maliha, Begum, Shamim Ara, and Dipa, Nibadita Saha, "An algorithm and method for sentiment analysis using the text and emoticon,"\emph{ICT Express}, Elsevier, Vol. 6, No. 4, pp.357--360, 2020.
+\bibitem{b14} Lee, Garam, Kim, Minsoo, Park, Jai Hyun, Hwang, Seung-won, and Cheon, Jung Hee, "Privacy-Preserving Text Classification on BERT Embeddings with Homomorphic Encryption,"\emph{arXiv preprint arXiv:2210.02574},2022.
+\bibitem{b15} Dien, Tran Thanh, Loc, Bui Huu, and Thai-Nghe, Nguyen, "Article classification using natural language processing and machine learning,"\emph{2019 International Conference on Advanced Computing and Applications (ACOMP)}, IEEE, pp. 78--84, 2019.
+\bibitem{b16} Podschwadt, Robert, and Takabi, Daniel, "Classification of Encrypted Word Embeddings using Recurrent Neural Networks,"\emph{PrivateNLP@ WSDM}, pp. 27--31, 2020.
+\bibitem{b17} Behera, Sagarika, Rekha, B, Pandey, Pragya, Vidya, B, and Prathuri, Jhansi Rani, "Preserving the Privacy of Medical Data using Homomorphic Encryption and Prediction of Heart Disease using K-Nearest Neighbor,"\emph{2022 IEEE International Conference on Data Science and Information System (ICDSIS)}, IEEE, pp. 1--6, 2022.
+\end{thebibliography}
+\vspace{12pt}
+\color{red}
+
+
+\end{document}
