@@ -1,0 +1,5 @@
+label_strategy,description,interpretability,macro_precision,macro_recall,macro_f1,balanced_accuracy,mcc
+strategy_a_thresholds,"Fixed latency thresholds: 0-2ms, 2-8ms, 8-25ms, 25ms+",high: classes map directly to stall severity thresholds,0.31617407443147416,0.302010808644794,0.3035051680735659,0.3186107363442462,0.15532843407284908
+strategy_b_percentile_qcut,Four equal-frequency percentile buckets using qcut,"medium: balanced class sizes, but thresholds depend on dataset distribution",0.4935714796594192,0.502113447902539,0.49450619352193603,0.502113447902539,0.33161145913125595
+strategy_c_quantile_min_size,Quantile classes with minimum class-size fallback for rare bins,medium: retains ordered severity while protecting against tiny classes,0.4935714796594192,0.502113447902539,0.49450619352193603,0.502113447902539,0.33161145913125595
+strategy_d_hybrid_mid_qcut,"Hybrid strategy: fixed normal/high thresholds, qcut splits the middle range",high: preserves intuitive normal/high boundaries while balancing middle classes,0.29782524026104545,0.3022363339278947,0.29399342047867183,0.3188422866729982,0.12144510392606711

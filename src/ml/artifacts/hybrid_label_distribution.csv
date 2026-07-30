@@ -1,0 +1,17 @@
+class,count,percentage,label_strategy
+0,178936,99.46857003090743,strategy_a_thresholds
+1,855,0.4752851711026616,strategy_a_thresholds
+2,81,0.04502701620972584,strategy_a_thresholds
+3,20,0.011117781780179218,strategy_a_thresholds
+0,44973,25.0,strategy_b_percentile_qcut
+1,44973,25.0,strategy_b_percentile_qcut
+2,44973,25.0,strategy_b_percentile_qcut
+3,44973,25.0,strategy_b_percentile_qcut
+0,44973,25.0,strategy_c_quantile_min_size
+1,44973,25.0,strategy_c_quantile_min_size
+2,44973,25.0,strategy_c_quantile_min_size
+3,44973,25.0,strategy_c_quantile_min_size
+0,178936,99.46857003090743,strategy_d_hybrid_mid_qcut
+1,468,0.2601560936561937,strategy_d_hybrid_mid_qcut
+2,468,0.2601560936561937,strategy_d_hybrid_mid_qcut
+3,20,0.011117781780179218,strategy_d_hybrid_mid_qcut
