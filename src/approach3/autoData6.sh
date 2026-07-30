@@ -4,138 +4,167 @@ set -e
 
 # ===== CONFIG =====
 CURRENT_LABEL=""
+ML_PID=""
 STRESS_PID=""
 PINNER_PID=""
 INTERRUPTED=false
 
-DURATION=300   # seconds per session — longer than stress-ng runs since ML startup
-               # (tokenizer/model/dataset download+load) eats into the window.
-               # Bump this up if you want deeper stalls recorded.
+DURATION=1500   # 25 minutes per session
 
 PINNER_CMD="sudo ./pinner --obj perf_monitor.bpf.o"
 READER_CMD="sudo ./reader"
 
-# label|command
-# Each command is run under `timeout ${DURATION}s`, same as stress-ng was.
+# label|ml command|stress-ng command
 SESSIONS=(
-"llm_train_cpu_saturation|python3 ml_stress.py --mode llm --model gpt2-medium --batch-size 32 --seq-len 512 --workers 16"
-"cnn_train_cpu_saturation|python3 ml_stress.py --mode cnn --batch-size 512 --workers 16"
-"combined_llm_cnn_saturation|python3 ml_stress.py --mode combined --workers 16"
-"bigdata_dataframe_flood|python3 ml_stress.py --mode bigdata --workers 16"
+"stream_memory_contention|python3 ml_stress.py --mode cnn --batch-size 128 --workers 2|stress-ng --cpu 0 --stream 0 --vm 1 --vm-bytes 400M"
+
+"cache_contention|python3 ml_stress.py --mode cnn --batch-size 128 --workers 2|stress-ng --cpu 0 --cache 0 --stream 0 --vm 1 --vm-bytes 400M"
+
+"context_switch_contention|python3 ml_stress.py --mode cnn --batch-size 128 --workers 2|stress-ng --cpu 0 --stream 0 --switch 4"
 )
 
 # ===== SUDO KEEP-ALIVE =====
 echo "[+] Requesting sudo access..."
 sudo -v
 
-( while true; do sudo -v; sleep 60; done ) &
+(
+while true; do
+    sudo -v
+    sleep 60
+done
+) &
 SUDO_KEEPALIVE_PID=$!
 
 # ===== CTRL+C HANDLER =====
 cleanup() {
-  echo
-  echo "[!] Ctrl+C detected — finishing current session safely..."
+    echo
+    echo "[!] Ctrl+C detected — finishing current session safely..."
 
-INTERRUPTED=true
+    INTERRUPTED=true
 
-# 1. stop stress/training first
-if [ -n "$STRESS_PID" ]; then
-    echo "[!] Stopping training workload..."
-    kill -INT $STRESS_PID 2>/dev/null || true
-    pkill -INT -P $STRESS_PID 2>/dev/null || true
-    wait $STRESS_PID 2>/dev/null || true
-STRESS_PID=""
-fi
+    # Stop ML
+    if [ -n "$ML_PID" ]; then
+        echo "[!] Stopping ML workload..."
+        kill -INT "$ML_PID" 2>/dev/null || true
+        pkill -INT -P "$ML_PID" 2>/dev/null || true
+        wait "$ML_PID" 2>/dev/null || true
+        ML_PID=""
+    fi
 
-# 2. stop pinner
-if [ -n "$PINNER_PID" ]; then
-    echo "[!] Stopping pinner..."
-    sudo kill -INT $PINNER_PID 2>/dev/null || true
-    wait $PINNER_PID 2>/dev/null || true
-PINNER_PID=""
-fi
+    # Stop stress-ng
+    if [ -n "$STRESS_PID" ]; then
+        echo "[!] Stopping stress-ng..."
+        kill -INT "$STRESS_PID" 2>/dev/null || true
+        wait "$STRESS_PID" 2>/dev/null || true
+        STRESS_PID=""
+    fi
 
-# 3. save current session
-if [ -n "$CURRENT_LABEL" ]; then
-    echo "[!] Saving data for session: $CURRENT_LABEL"
-$READER_CMD --label "$CURRENT_LABEL" --append
-fi
+    # Stop pinner
+    if [ -n "$PINNER_PID" ]; then
+        echo "[!] Stopping pinner..."
+        sudo kill -INT "$PINNER_PID" 2>/dev/null || true
+        wait "$PINNER_PID" 2>/dev/null || true
+        PINNER_PID=""
+    fi
 
-# stop sudo keepalive
-  kill $SUDO_KEEPALIVE_PID 2>/dev/null || true
+    # Save current session
+    if [ -n "$CURRENT_LABEL" ]; then
+        echo "[!] Saving data for session: $CURRENT_LABEL"
+        $READER_CMD --label "$CURRENT_LABEL" --append
+    fi
 
-  echo "[!] Exit complete"
-  exit 0
+    kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+
+    echo "[!] Exit complete"
+    exit 0
 }
 
-trap cleanup INT
-trap 'kill $SUDO_KEEPALIVE_PID 2>/dev/null || true' EXIT
+trap cleanup INT TERM
+trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true' EXIT
 
 # ===== HELPERS =====
 
 start_pinner() {
-  echo "[+] Starting pinner..."
-$PINNER_CMD &
-PINNER_PID=$!
-  sleep 1
+    echo "[+] Starting pinner..."
+    $PINNER_CMD &
+    PINNER_PID=$!
+    sleep 1
 }
 
 stop_pinner() {
-  echo "[+] Stopping pinner (SIGINT)..."
-  sudo kill -INT $PINNER_PID
-  wait $PINNER_PID 2>/dev/null || true
-PINNER_PID=""
+    echo "[+] Stopping pinner..."
+    sudo kill -INT "$PINNER_PID"
+    wait "$PINNER_PID" 2>/dev/null || true
+    PINNER_PID=""
 }
 
 run_reader() {
-local label=$1
-  echo "[+] Running reader for label: $label"
-$READER_CMD --label "$label" --append
+    local label=$1
+    echo "[+] Running reader for label: $label"
+    $READER_CMD --label "$label" --append
 }
 
 # ===== MAIN LOOP =====
 
-for entry in "${SESSIONS[@]}"; do
-IFS="|" read -r label cmd <<< "$entry"
+while true; do
 
-CURRENT_LABEL="$label"
+    for entry in "${SESSIONS[@]}"; do
 
-echo "======================================="
-echo "[SESSION] $label"
-echo "======================================="
+        IFS="|" read -r label ml_cmd stress_cmd <<< "$entry"
 
-# 1. start training workload FIRST
-echo "[+] Starting workload: $cmd"
-timeout ${DURATION}s bash -c "$cmd" &
-STRESS_PID=$!
+        CURRENT_LABEL="$label"
 
-# 2. wait 2 sec, then start pinner
-sleep 2
-start_pinner
+        echo "======================================="
+        echo "[SESSION] $label"
+        echo "======================================="
 
-# 3. wait until workload finishes (or times out)
-wait $STRESS_PID
-STRESS_PID=""
+        # Start ML first
+        echo "[+] Starting ML workload..."
+        timeout ${DURATION}s bash -c "$ml_cmd" &
+        ML_PID=$!
 
-# 4. immediately stop pinner
-stop_pinner
+        # Give ML time to initialize
+        echo "[+] Waiting 10 seconds before starting stress-ng..."
+        sleep 10
 
-# 5. run reader
-run_reader "$label"
+        # Start stress-ng
+        echo "[+] Starting stress-ng..."
+        timeout ${DURATION}s bash -c "$stress_cmd" &
+        STRESS_PID=$!
 
-echo "[✓] Completed: $label"
-echo
+        # Start pinner immediately after stress-ng
+        sleep 5
+        start_pinner
 
-# stop further sessions if interrupted
-if [ "$INTERRUPTED" = true ]; then
-echo "[!] Stopping further sessions"
-break
-fi
+        # Wait for workloads
+        wait "$ML_PID" 2>/dev/null || true
+        ML_PID=""
 
-sleep 5
+        wait "$STRESS_PID" 2>/dev/null || true
+        STRESS_PID=""
+
+        # Stop pinner
+        stop_pinner
+        sleep 1
+
+        # Save data
+        run_reader "$label"
+        CURRENT_LABEL=""
+
+        echo "[✓] Completed: $label"
+        echo
+
+        if [ "$INTERRUPTED" = true ]; then
+            echo "[!] Stopping further sessions"
+            break 2
+        fi
+
+        sleep 5
+
+    done
+
 done
 
-# final cleanup
-kill $SUDO_KEEPALIVE_PID 2>/dev/null || true
+kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
 
 echo "All sessions complete!"

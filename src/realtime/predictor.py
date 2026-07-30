@@ -27,34 +27,73 @@ class Predictor:
 
         import joblib
 
-        self.model = joblib.load(self.config.model_path)
+        self.model = self.reader.model
 
     def run_forever(self) -> None:
         while True:
             result = self.reader.read_once()
-            feature_values = result["features"].to_numpy(dtype=float)
-            predictions = list(self.model.predict(feature_values))
+            feature_frame = result["features"]
+            predictions = self.model.predict(feature_frame)
+
             probabilities = None
             if hasattr(self.model, "predict_proba"):
-                probabilities = self.model.predict_proba(feature_values)
+                probabilities = self.model.predict_proba(feature_frame)
 
             payload = []
+
+            LABELS = {
+                "0": "CPU_BOUND",
+                "1": "MEMORY_BOUND",
+                "2": "IO_BOUND",
+                "3": "LOCK_CONTENTION",
+            }
+
             for index, row in result["rows"].iterrows():
-                item = {
-                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+
+                prediction = str(predictions[index])
+
+                confidence = None
+                if probabilities is not None:
+                    confidence = max(probabilities[index]) * 100
+
+                payload.append({
                     "pid": int(row["pid"]),
                     "cpu": int(row["cpu"]),
-                    "comm": str(row.get("comm", "")),
-                    "prediction": str(predictions[index]),
-                }
-                if probabilities is not None:
-                    item["probabilities"] = probabilities[index].tolist()
-                payload.append(item)
+                    "comm": str(row.get("comm", "") or "-"),
+                    "prediction": LABELS.get(prediction, prediction),
+                    "confidence": confidence,
+                })
 
-            if self.debug_enabled:
-                print("[realtime][debug] prediction summary: " + json.dumps(payload, indent=2, sort_keys=True))
-            else:
-                print(json.dumps(payload, indent=2, sort_keys=True))
+            # Sort by confidence (highest first)
+            payload.sort(
+                key=lambda x: x["confidence"] if x["confidence"] is not None else 0,
+                reverse=True,
+            )
+
+            print("\n" + "=" * 72)
+            print(f"Prediction Time : {datetime.now().strftime('%H:%M:%S')}")
+            print("=" * 72)
+            print(f"{'PID':<8}{'CPU':<6}{'PROCESS':<22}{'PREDICTION':<20}{'CONF'}")
+            print("-" * 72)
+
+            for item in payload[:15]:          # Show top 15 only
+                conf = (
+                    f"{item['confidence']:.1f}%"
+                    if item["confidence"] is not None
+                    else "-"
+                )
+
+                print(
+                    f"{item['pid']:<8}"
+                    f"{item['cpu']:<6}"
+                    f"{item['comm'][:20]:<22}"
+                    f"{item['prediction']:<20}"
+                    f"{conf}"
+                )
+
+            print("-" * 72)
+            print(f"Processes monitored : {len(payload)}")
+            print("=" * 72)
             time.sleep(self.config.polling_interval_s)
 
 

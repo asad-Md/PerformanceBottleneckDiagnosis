@@ -75,3 +75,6 @@ desktop.ini
 !src/ml/artifacts/cleaning_report.json
 !src/ml/IMPLEMENTATION_CHECKLIST.md
 !src/ml/REFACTOR_SUMMARY.md
+
+
+**/data/cifar-100-python/

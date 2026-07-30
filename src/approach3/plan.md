@@ -622,3 +622,19 @@ sudo ./pinner --obj perf_monitor.bpf.o
 # look for: "[pinner] N programs attached, 0 failed"
 # If you see failed attachments, check dmesg for verifier errors:
 sudo dmesg | tail -30
+
+```
+
+## venv for ml stress
+
+``` bash
+python3.12 -m venv venv
+source venv/bin/activate
+pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pip3 install transformers datasets pandas numpy
+
+cd '/home/asad/Code/FYP/PerformanceBottleneckDiagnosis'
+source venv/bin/activate
+cd '/home/asad/Code/FYP/PerformanceBottleneckDiagnosis/src/approach3'
+
+```

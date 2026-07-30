@@ -1,0 +1,5 @@
+method,n_clusters,n_noise_excluded,silhouette,calinski_harabasz,davies_bouldin
+KMeans (k=4),4,0,0.532,1161.81,0.916
+GMM (k=4),4,0,0.524,923.338,1.23
+Agglomerative (k=4),4,0,0.477,1086.937,1.197
+DBSCAN,23,2565,-0.168,914.632,0.625

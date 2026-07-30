@@ -6,18 +6,6 @@ generator on a Ryzen 7 7840HS / 16GB RAM laptop (HP Omen 16).
 Forces everything onto CPU (no CUDA) so the load lands where you want it:
 CPU cores + RAM + memory bandwidth. Batch sizes / model sizes are picked
 deliberately large so they exceed 16GB RAM and force swapping / thrashing.
-
-Modes:
-  llm       - finetune GPT-2 (medium/large) on WikiText-103
-  cnn       - train ResNet-50 on CIFAR-100 with heavy augmentation + workers
-  combined  - runs llm + cnn simultaneously in separate processes
-  bigdata   - heavy pandas/numpy transforms over Amazon Polarity (4M rows)
-
-Usage examples:
-  python3 ml_stress.py --mode llm --model gpt2-medium --batch-size 32 --seq-len 512 --workers 16
-  python3 ml_stress.py --mode cnn --batch-size 512 --workers 16
-  python3 ml_stress.py --mode combined --workers 16
-  python3 ml_stress.py --mode bigdata --workers 16
 """
 
 import os
@@ -28,6 +16,14 @@ import sys
 import time
 import argparse
 import multiprocessing as mp
+
+# Automatically look for HF_TOKEN environment variable for faster downloads
+if "HF_TOKEN" in os.environ:
+    try:
+        from huggingface_hub import login
+        login(token=os.environ["HF_TOKEN"])
+    except Exception:
+        pass
 
 def log(msg):
     print(f"[ml_stress] {msg}", flush=True)
@@ -82,9 +78,7 @@ def run_llm(model_name="gpt2-medium", batch_size=32, seq_len=512, workers=16, ep
 
             # Intentional memory pressure: keep a rolling buffer of detached
             # copies of hidden states so RSS keeps climbing past 16GB.
-            memory_hog.append(outputs.logits.detach().clone())
-            if len(memory_hog) > 40:
-                memory_hog.pop(0)
+            # pass
 
             step += 1
             if step % 5 == 0:
@@ -114,7 +108,7 @@ def run_cnn(batch_size=512, workers=16, epochs=1000):
     ])
 
     log("Loading CIFAR-100 (torchvision, auto-downloads ~170MB)")
-    dataset = torchvision.datasets.CIFAR100(root="./data", train=True, download=True, transform=transform)
+    dataset = torchvision.datasets.CIFAR100(root="./data", train=True, download=False, transform=transform)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
                          num_workers=workers, pin_memory=False, persistent_workers=True,
                          prefetch_factor=4)
@@ -138,7 +132,7 @@ def run_cnn(batch_size=512, workers=16, epochs=1000):
             optimizer.step()
 
             memory_hog.append(images.clone())
-            if len(memory_hog) > 30:
+            if len(memory_hog) > 3:
                 memory_hog.pop(0)
 
             step += 1
@@ -150,14 +144,18 @@ def run_cnn(batch_size=512, workers=16, epochs=1000):
 # ----------------------------------------------------------------------
 # Combined mode: LLM + CNN training as separate processes, same time
 # ----------------------------------------------------------------------
-def run_combined(workers=16):
-    llm_workers = max(4, workers // 2)
-    cnn_workers = max(4, workers // 2)
+def run_combined(model_name="gpt2-medium", batch_size=32, seq_len=512, workers=16):
+    llm_workers = max(2, workers // 2)
+    cnn_workers = max(2, workers // 2)
 
-    p1 = mp.Process(target=run_llm, kwargs=dict(model_name="gpt2-medium",
-                                                 batch_size=16, seq_len=512,
+    # Split batch size gracefully for concurrent execution
+    llm_batch = max(2, batch_size // 2)
+    cnn_batch = batch_size
+
+    p1 = mp.Process(target=run_llm, kwargs=dict(model_name=model_name,
+                                                 batch_size=llm_batch, seq_len=seq_len,
                                                  workers=llm_workers))
-    p2 = mp.Process(target=run_cnn, kwargs=dict(batch_size=256, workers=cnn_workers))
+    p2 = mp.Process(target=run_cnn, kwargs=dict(batch_size=cnn_batch, workers=cnn_workers))
     p1.start()
     p2.start()
     log(f"combined mode: llm pid={p1.pid}, cnn pid={p2.pid}")
@@ -174,7 +172,7 @@ def run_bigdata(workers=16, rounds=100000):
     from datasets import load_dataset
 
     log("Loading Amazon Polarity (4M rows) — first run downloads several GB")
-    ds = load_dataset("amazon_polarity", split="train")
+    ds = load_dataset("fancyzhx/amazon_polarity", split="train")
 
     log("Converting to pandas (this alone will use multiple GB of RAM)")
     df = ds.to_pandas()
@@ -190,7 +188,7 @@ def run_bigdata(workers=16, rounds=100000):
         merged = df.merge(df.sample(frac=0.3), on="label", suffixes=("", "_dup"))
 
         memory_hog.append(merged.copy())
-        if len(memory_hog) > 5:
+        if len(memory_hog) > 1:
             memory_hog.pop(0)
 
         if r % 2 == 0:
@@ -215,7 +213,8 @@ def main():
     elif args.mode == "cnn":
         run_cnn(batch_size=args.batch_size, workers=args.workers)
     elif args.mode == "combined":
-        run_combined(workers=args.workers)
+        run_combined(model_name=args.model, batch_size=args.batch_size,
+                     seq_len=args.seq_len, workers=args.workers)
     elif args.mode == "bigdata":
         run_bigdata(workers=args.workers)
 
