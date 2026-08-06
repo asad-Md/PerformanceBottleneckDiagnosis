@@ -1,4 +1,7 @@
 strategy,accuracy,macro_f1,weighted_f1,recall_Normal,recall_Low,recall_Medium,recall_High
-Baseline (no handling),0.721,0.645,0.708,0.854,0.686,0.294,0.616
-class_weight=balanced (v4 baseline),0.683,0.625,0.694,0.718,0.662,0.57,0.794
-"MLP (scaled, Baseline (no handling))",0.693,0.596,0.673,0.843,0.659,0.19,0.605
+Baseline (no handling),0.716,0.673,0.707,0.836,0.687,0.386,0.645
+SMOTE,0.707,0.661,0.705,0.787,0.69,0.466,0.807
+Borderline-SMOTE,0.705,0.658,0.704,0.778,0.701,0.459,0.791
+ADASYN,0.703,0.649,0.702,0.777,0.696,0.456,0.834
+"MLP (scaled, Baseline (no handling))",0.69,0.646,0.68,0.821,0.644,0.359,0.645
+class_weight=balanced (v4 baseline),0.682,0.629,0.69,0.705,0.69,0.564,0.858

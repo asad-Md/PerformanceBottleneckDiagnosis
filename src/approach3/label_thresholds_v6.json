@@ -1,0 +1,4 @@
+{
+  "normal_threshold_ns": 100000,
+  "high_threshold_ns": 1000000
+}
