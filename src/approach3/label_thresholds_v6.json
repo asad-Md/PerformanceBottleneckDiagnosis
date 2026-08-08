@@ -1,4 +1,4 @@
 {
-  "normal_threshold_ns": 100000,
-  "high_threshold_ns": 1000000
+  "normal_threshold_ns": 500000,
+  "high_threshold_ns": 1500000
 }
