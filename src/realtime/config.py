@@ -14,7 +14,6 @@ class RealtimeConfig:
     syscall_map_path: str = "/sys/fs/bpf/syscall_map"
     lock_map_path: str = "/sys/fs/bpf/lock_map"
 
-    # v5 artifacts (bottleneck_diagnosis_v5.ipynb, Section 8)
     model_path: str = ""
     scaler_path: str = ""
     feature_cols_path: str = ""
@@ -24,7 +23,6 @@ class RealtimeConfig:
 def load_config() -> RealtimeConfig:
     cfg = RealtimeConfig()
     root = Path(__file__).resolve().parent.parent
-    # Same directory as this config.py / predictor.py — where the user keeps the v5 artifacts.
     local_dir = Path(__file__).resolve().parent
 
     cfg.polling_interval_s = float(os.getenv("REALTIME_POLLING_INTERVAL_S", "5.0"))
@@ -36,8 +34,7 @@ def load_config() -> RealtimeConfig:
 
     model_candidates = [
         os.getenv("REALTIME_MODEL_PATH", ""),
-        str(local_dir / "champion_model_v5.pkl"),
-        str(root / "ml" / "artifacts" / "champion_model_v5.pkl"),
+        str(local_dir / "champion_model_v7.pkl"),
     ]
     for candidate in model_candidates:
         if candidate and os.path.exists(candidate):
@@ -46,8 +43,7 @@ def load_config() -> RealtimeConfig:
 
     scaler_candidates = [
         os.getenv("REALTIME_SCALER_PATH", ""),
-        str(local_dir / "feature_scaler_v5.pkl"),
-        str(root / "ml" / "artifacts" / "feature_scaler_v5.pkl"),
+        str(local_dir / "feature_scaler_v7.pkl"),
     ]
     for candidate in scaler_candidates:
         if candidate and os.path.exists(candidate):
@@ -56,8 +52,7 @@ def load_config() -> RealtimeConfig:
 
     feature_candidates = [
         os.getenv("REALTIME_FEATURE_COLS_PATH", ""),
-        str(local_dir / "feature_cols_v5.json"),
-        str(root / "ml" / "artifacts" / "feature_cols_v5.json"),
+        str(local_dir / "feature_cols_v7.json"),
     ]
     for candidate in feature_candidates:
         if candidate and os.path.exists(candidate):
@@ -66,8 +61,7 @@ def load_config() -> RealtimeConfig:
 
     threshold_candidates = [
         os.getenv("REALTIME_LABEL_THRESHOLDS_PATH", ""),
-        str(local_dir / "label_thresholds_v5.json"),
-        str(root / "ml" / "artifacts" / "label_thresholds_v5.json"),
+        str(local_dir / "label_thresholds_v7.json"),
     ]
     for candidate in threshold_candidates:
         if candidate and os.path.exists(candidate):

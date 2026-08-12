@@ -1,0 +1,7 @@
+strategy,accuracy,macro_f1,weighted_f1,precision_high,recall_high,f1_high,pr_auc_high,roc_auc_high
+Tuned (Baseline (no handling)),0.981,0.867,0.979,0.882,0.642,0.743,0.831,0.975
+Baseline (no handling),0.981,0.865,0.979,0.888,0.634,0.74,0.83,0.974
+SMOTE,0.975,0.856,0.975,0.683,0.771,0.724,0.817,0.972
+Borderline-SMOTE,0.974,0.854,0.975,0.675,0.773,0.721,0.815,0.971
+ADASYN,0.97,0.84,0.972,0.621,0.789,0.695,0.81,0.971
+class_weight=balanced,0.949,0.784,0.956,0.452,0.875,0.596,0.825,0.975

@@ -8,22 +8,21 @@ from pathlib import Path
 
 try:
     from .config import RealtimeConfig, load_config
-    from .realtime_reader import RealtimeReader, CLASS_NAMES, BOTTLENECK_CLASS
+    from .realtime_reader import RealtimeReader
     from .utils import unpin_maps
 except ImportError:  # pragma: no cover - direct-script fallback
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from realtime.config import RealtimeConfig, load_config
-    from realtime.realtime_reader import RealtimeReader, CLASS_NAMES, BOTTLENECK_CLASS
+    from realtime.realtime_reader import RealtimeReader
     from realtime.utils import unpin_maps
 
 
+BINARY_CLASS_NAMES = {0: "Not-High", 1: "High"}
+BINARY_BOTTLENECK_CLASS = 1
+
+
 class Predictor:
-    # "class_then_confidence" — group by severity class (High->Normal), sort by confidence
-    #     within each class. Bottlenecks always dominate the top of the list.
-    # "top_per_class"         — take the N highest-confidence rows from EACH class (High,
-    #     Medium, Low, Normal), still ordered severity-first. Guarantees every class is
-    #     represented even when one class (e.g. Normal) vastly outnumbers the others.
-    DISPLAY_MODE = os.getenv("REALTIME_DISPLAY_MODE", "top_per_class")  # or "class_then_confidence"
+    DISPLAY_MODE = os.getenv("REALTIME_DISPLAY_MODE", "top_per_class")
     TOP_N_PER_CLASS = int(os.getenv("REALTIME_TOP_N_PER_CLASS", "4"))
     MAX_ROWS_SHOWN = int(os.getenv("REALTIME_MAX_ROWS_SHOWN", "16"))
 
@@ -36,6 +35,21 @@ class Predictor:
             raise RuntimeError(f"Missing model for realtime inference: {self.config.model_path}")
 
         self.model = self.reader.model
+        self.class_names = BINARY_CLASS_NAMES.copy()
+        self.bottleneck_class = BINARY_BOTTLENECK_CLASS
+
+        if hasattr(self.model, "classes_"):
+            try:
+                model_classes = tuple(int(c) for c in self.model.classes_)
+                if set(model_classes) == {0, 1}:
+                    self.class_names = {cls: BINARY_CLASS_NAMES[cls] for cls in sorted(model_classes)}
+                else:
+                    self._log_warning(
+                        "Loaded model classes are not binary {0, 1}. Predictions will still be shown, "
+                        "but class labels may be incorrect."
+                    )
+            except Exception:
+                self._log_warning("Failed to normalize model classes from model.classes_. Using default binary labels.")
 
         self._map_paths = [
             self.config.sched_map_path,
@@ -43,6 +57,10 @@ class Predictor:
             self.config.syscall_map_path,
             self.config.lock_map_path,
         ]
+
+    def _log_warning(self, message: str) -> None:
+        if self.debug_enabled:
+            print(f"[predictor][warning] {message}")
 
     def run_forever(self) -> None:
         try:
@@ -53,9 +71,6 @@ class Predictor:
             self.cleanup()
 
     def cleanup(self) -> None:
-        """Unpin the BPF maps (delete their bpffs pin files) so `sudo ls -l /sys/fs/bpf` comes
-        back empty after this process exits. Pinning is just a filesystem reference in bpffs;
-        removing the pin file drops it. Runs on Ctrl+C and on any other exit out of run_forever."""
         print("[predictor] unpinning BPF maps...")
         unpin_maps(self._map_paths)
 
@@ -66,12 +81,9 @@ class Predictor:
             probabilities = result["probabilities"]
             rows_df = result["rows"]
 
-            payload = []
-            # Iterate positionally — predictions/probabilities are plain numpy arrays aligned
-            # with rows_df's row order, not with rows_df's pandas index.
+            payload: list[dict[str, object]] = []
             for position, (_, row) in enumerate(rows_df.iterrows()):
                 pred_class = int(predictions[position])
-
                 confidence = None
                 if probabilities is not None:
                     confidence = float(max(probabilities[position]) * 100)
@@ -80,14 +92,14 @@ class Predictor:
                     "pid": int(row["pid"]),
                     "cpu": int(row["cpu"]),
                     "comm": str(row.get("comm", "") or "-"),
-                    "pred_class": pred_class,  # raw 0/1/2/3 stall-severity class
-                    "prediction": CLASS_NAMES.get(pred_class, str(pred_class)),
-                    "is_bottleneck": pred_class == BOTTLENECK_CLASS,
+                    "pred_class": pred_class,
+                    "prediction": self.class_names.get(pred_class, str(pred_class)),
+                    "is_bottleneck": pred_class == self.bottleneck_class,
                     "confidence": confidence,
                 })
 
-            bottleneck_count = sum(1 for item in payload if item["is_bottleneck"])
             rows_to_show = self._select_display_rows(payload)
+            bottleneck_count = sum(1 for item in payload if item["is_bottleneck"])
 
             print("\n" + "=" * 80)
             print(f"Prediction Time : {datetime.now().strftime('%H:%M:%S')}  |  display mode: {self.DISPLAY_MODE}")
@@ -96,13 +108,8 @@ class Predictor:
             print("-" * 80)
 
             for item in rows_to_show:
-                conf = (
-                    f"{item['confidence']:.1f}%"
-                    if item["confidence"] is not None
-                    else "-"
-                )
+                conf = f"{item['confidence']:.1f}%" if item["confidence"] is not None else "-"
                 marker = " <-- BOTTLENECK" if item["is_bottleneck"] else ""
-
                 print(
                     f"{item['pid']:<8}"
                     f"{item['cpu']:<6}"
@@ -113,19 +120,14 @@ class Predictor:
                 )
 
             print("-" * 80)
-            print(f"Processes monitored : {len(payload)}   |   Bottlenecks (class {BOTTLENECK_CLASS}) : {bottleneck_count}")
+            print(f"Processes monitored : {len(payload)}   |   Bottlenecks (class {self.bottleneck_class}) : {bottleneck_count}")
             print("=" * 80)
             time.sleep(self.config.polling_interval_s)
 
     def _select_display_rows(self, payload: list[dict]) -> list[dict]:
-        """Picks which rows to print, per self.DISPLAY_MODE. Both modes always order
-        severity class High(3) -> Normal(0) first; they only differ in how much of each
-        class gets shown."""
         if self.DISPLAY_MODE == "top_per_class":
-            # Best few (by confidence) from EVERY class, so Medium/Low/Normal don't get
-            # crowded out by however many thousand Normal-class rows exist.
             selected: list[dict] = []
-            for cls in sorted(CLASS_NAMES.keys(), reverse=True):  # 3, 2, 1, 0
+            for cls in sorted(self.class_names.keys(), reverse=True):
                 class_rows = sorted(
                     (item for item in payload if item["pred_class"] == cls),
                     key=lambda x: x["confidence"] if x["confidence"] is not None else 0,
@@ -134,8 +136,6 @@ class Predictor:
                 selected.extend(class_rows[: self.TOP_N_PER_CLASS])
             return selected[: self.MAX_ROWS_SHOWN]
 
-        # "class_then_confidence" — one global list, grouped by class, confidence-sorted
-        # within each class.
         ordered = sorted(
             payload,
             key=lambda x: (x["pred_class"], x["confidence"] if x["confidence"] is not None else 0),
