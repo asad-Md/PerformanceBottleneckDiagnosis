@@ -78,3 +78,26 @@ desktop.ini
 
 
 **/data/cifar-100-python/
+
+# ==================================================
+# Node / Frontend
+# ==================================================
+**/node_modules/
+**/dist/
+**/.vite/
+
+# TypeScript build info
+**/*.tsbuildinfo
+
+# Frontend environment files
+**/.env
+**/.env.*
+!**/.env.example
+
+# npm debug logs
+**/npm-debug.log*
+**/yarn-debug.log*
+**/yarn-error.log*
+
+# Test / coverage output
+**/coverage/
