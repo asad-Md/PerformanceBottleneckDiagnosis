@@ -1,0 +1,13 @@
+               precision    recall  f1-score   support
+
+          CPU       0.93      1.00      0.97    259162
+       Memory       0.91      1.00      0.95    249786
+        Cache       0.28      0.96      0.44     53478
+           IO       0.34      0.90      0.49     46136
+         Lock       0.34      0.76      0.47     36097
+ContextSwitch       0.25      0.97      0.39     48684
+
+    micro avg       0.60      0.98      0.74    693343
+    macro avg       0.51      0.93      0.62    693343
+ weighted avg       0.76      0.98      0.82    693343
+  samples avg       0.62      0.98      0.74    693343

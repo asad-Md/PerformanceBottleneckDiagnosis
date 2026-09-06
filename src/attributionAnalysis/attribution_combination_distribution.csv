@@ -1,0 +1,12 @@
+causal_combination,row_count,percentage
+CPU + Memory,239365,34.45
+CPU + Memory + Cache,133428,19.203
+CPU + Memory + ContextSwitch,121529,17.491
+CPU + Memory + IO + Lock,57923,8.336
+CPU + Memory + IO,46473,6.689
+CPU,26485,3.812
+Memory,25920,3.73
+CPU + Lock,17708,2.549
+Lock,14991,2.158
+IO,6433,0.926
+CPU + IO,4564,0.657

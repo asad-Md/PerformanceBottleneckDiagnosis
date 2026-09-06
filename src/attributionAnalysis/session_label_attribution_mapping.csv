@@ -1,0 +1,51 @@
+session_label,CPU,Memory,Cache,IO,Lock,ContextSwitch,mapping_status,evidence,causal_combination,row_count,percentage
+cache_contention,1,1,1,0,0,0,WORKLOAD_DERIVED,CNN training + cache + memory stream + VM stress,CPU + Memory + Cache,133428,17.159
+compile_blender,1,1,0,1,0,0,PARTIAL,Kernel build + Blender; exact Blender workload unavailable,CPU + Memory + IO,6570,0.845
+compile_only,1,1,0,1,0,0,PARTIAL,"Kernel build; CPU + memory confirmed, disk I/O secondary",CPU + Memory + IO,6823,0.877
+compile_sysbench,1,1,0,1,0,0,PARTIAL,Kernel build + sysbench; exact sysbench balance unavailable,CPU + Memory + IO,6585,0.847
+context_switch_contention,1,1,0,0,0,1,WORKLOAD_DERIVED,CNN training + context-switch stress,CPU + Memory + ContextSwitch,121529,15.629
+cpu_2x,1,0,0,0,0,0,CONFIRMED,stress-ng CPU workload,CPU,4217,0.542
+cpu_4x,1,0,0,0,0,0,CONFIRMED,stress-ng CPU workload,CPU,4363,0.561
+cpu_8x,1,0,0,0,0,0,CONFIRMED,stress-ng CPU workload,CPU,10213,1.313
+cpu_extreme,1,0,0,0,0,0,CONFIRMED,stress-ng CPU workload,CPU,3287,0.423
+cpu_high,,,,,,,UNKNOWN,,UNKNOWN,5621,0.723
+cpu_io_extreme,1,0,0,1,0,0,CONFIRMED,stress-ng CPU + I/O workload,CPU + IO,4564,0.587
+cpu_l3_cache_misses,,,,,,,UNKNOWN,,UNKNOWN,2223,0.286
+cpu_low,,,,,,,UNKNOWN,,UNKNOWN,8331,1.071
+cpu_medium,,,,,,,UNKNOWN,,UNKNOWN,9261,1.191
+cpu_mem_2x,1,1,0,0,0,0,CONFIRMED,stress-ng CPU + VM workload,CPU + Memory,6718,0.864
+cpu_mem_4x,1,1,0,0,0,0,CONFIRMED,stress-ng CPU + VM workload,CPU + Memory,8024,1.032
+cpu_mem_8x,1,1,0,0,0,0,CONFIRMED,stress-ng CPU + VM workload,CPU + Memory,7969,1.025
+cpu_mem_extreme,1,1,0,0,0,0,CONFIRMED,stress-ng CPU + VM workload,CPU + Memory,4183,0.538
+cpu_mem_io,1,1,0,1,0,0,CONFIRMED,stress-ng CPU + VM + I/O workload,CPU + Memory + IO,9449,1.215
+cpu_mem_io_heavy,1,1,0,1,0,0,CONFIRMED,stress-ng CPU + VM + I/O workload,CPU + Memory + IO,8082,1.039
+cpu_mem_ultra,1,1,0,0,0,0,CONFIRMED,stress-ng CPU + VM workload,CPU + Memory,4573,0.588
+cpu_overloaded,,,,,,,UNKNOWN,,UNKNOWN,6108,0.786
+cpu_ultra,1,0,0,0,0,0,CONFIRMED,stress-ng CPU workload,CPU,4405,0.567
+ctx_flood,,,,,,,UNKNOWN,,UNKNOWN,1058,0.136
+everything_extreme,1,1,0,1,1,0,CONFIRMED,combined CPU + VM + I/O + mutex/futex workload,CPU + Memory + IO + Lock,9705,1.248
+everything_insane,1,1,0,1,1,0,CONFIRMED,combined CPU + VM + I/O + mutex/futex workload,CPU + Memory + IO + Lock,20568,2.645
+everything_max,1,1,0,1,1,0,CONFIRMED,combined CPU + VM + I/O + mutex/futex workload,CPU + Memory + IO + Lock,21993,2.828
+full_system,1,1,0,1,0,0,PARTIAL,Kernel build + sysbench + Blender + Docker chaos; exact profiles unavailable,CPU + Memory + IO,8964,1.153
+idle,,,,,,,UNKNOWN,,UNKNOWN,4086,0.525
+io_async_saturation,,,,,,,UNKNOWN,,UNKNOWN,3604,0.463
+io_extreme,0,0,0,1,0,0,CONFIRMED,stress-ng I/O workload,IO,6433,0.827
+io_low,,,,,,,UNKNOWN,,UNKNOWN,6653,0.856
+llm_inference,1,1,0,0,0,0,WORKLOAD_DERIVED,"Supplied ml_stress.py performs GPT-2 training, not inference",CPU + Memory,39621,5.095
+lock_cpu_heavy,1,0,0,0,1,0,CONFIRMED,stress-ng CPU + mutex/futex workload,CPU + Lock,11752,1.511
+lock_cpu_mix,1,0,0,0,1,0,CONFIRMED,stress-ng CPU + mutex/futex workload,CPU + Lock,5956,0.766
+lock_extreme,0,0,0,0,1,0,CONFIRMED,stress-ng mutex/futex workload,Lock,5058,0.65
+lock_heavy,0,0,0,0,1,0,CONFIRMED,stress-ng mutex/futex workload,Lock,9933,1.277
+lock_low,,,,,,,UNKNOWN,,UNKNOWN,10112,1.3
+mem_extreme,0,1,0,0,0,0,CONFIRMED,stress-ng VM/memory workload,Memory,7764,0.998
+mem_heavy_reclaim,0,1,0,0,0,0,CONFIRMED,stress-ng VM/memory workload,Memory,4437,0.571
+mem_high,,,,,,,UNKNOWN,,UNKNOWN,6129,0.788
+mem_low,,,,,,,UNKNOWN,,UNKNOWN,7914,1.018
+mem_reclaim,0,1,0,0,0,0,CONFIRMED,stress-ng VM/memory workload,Memory,7449,0.958
+mem_swap_thrash,,,,,,,UNKNOWN,,UNKNOWN,1011,0.13
+mem_swap_thrashing,,,,,,,UNKNOWN,,UNKNOWN,4191,0.539
+mem_thrashing,0,1,0,0,0,0,CONFIRMED,stress-ng VM/memory workload,Memory,6270,0.806
+mem_tlb_cache_miss,,,,,,,UNKNOWN,,UNKNOWN,6457,0.83
+mixed_load,1,1,0,1,1,0,CONFIRMED,combined CPU + VM + I/O + mutex/futex workload,CPU + Memory + IO + Lock,5657,0.728
+ml_training,1,1,0,0,0,0,WORKLOAD_DERIVED,ResNet-50 CPU training + DataLoader workers,CPU + Memory,21422,2.755
+stream_memory_contention,1,1,0,0,0,0,WORKLOAD_DERIVED,CNN training + memory allocation/stream stress,CPU + Memory,146855,18.886

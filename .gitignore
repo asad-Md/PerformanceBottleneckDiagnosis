@@ -101,3 +101,6 @@ desktop.ini
 # Test / coverage output
 **/coverage/src/approach3/champion_model_v5.pkl
 *.pkl
+
+#reproducible artifacts
+src/attributionAnalysis/attribution_dataset.csv
