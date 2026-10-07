@@ -1,0 +1,420 @@
+REVIEWER-RESPONSE RESEARCH NOTES: COMMENTS 3-10
+================================================
+
+Purpose and evidence convention
+-------------------------------
+This document assembles implementation- and artifact-grounded material for a
+revised methods section. Statements below distinguish (A) values verified from
+the checked-in source, CSVs, and the v7 training notebook from (B) experiment
+metadata that is not preserved in those artifacts. Do not present an unknown
+number of executions, exact run durations, or host configuration as measured
+fact. The available training run is the binary v7 Random Forest champion, not
+the earlier four-class prototype described in older comments in reader.c and
+plan.md.
+
+Primary evidence inspected: perf_monitor.bpf.c, pinner.c, reader.c,
+autoData.sh through autoData6.sh, autoTest.sh, ml_stress.py,
+champion_model_train_v7.ipynb, feature_cols_v7.json,
+label_thresholds_v7.json, champion_metrics_v7.csv, perf_metrics1.csv, and
+perf_metrics2.csv.
+
+
+COMMENT 3 — TELEMETRY, KERNEL HOOKS, MAPS, AND SNAPSHOTS
+========================================================
+
+Collection design
+-----------------
+The collector is event-driven. eBPF programs execute on the kernel events in
+Table 3.1 and update in-kernel maps immediately; there is no periodic timer,
+ring-buffer polling loop, or fixed-interval sampling in this implementation.
+The counters are cumulative from map creation. pinner.c loads the BPF object,
+attaches its programs, and records monotonic session start/end timestamps.
+After the pinner stops, reader.c reads the four pinned aggregate maps once,
+merges entries on (pid, cpu), computes averages from sums and counts, and
+exports one CSV row for each observed PID/CPU key. Consequently, “snapshot
+interval” is one end-of-session snapshot, not a recurring interval. The
+timestamp_ns output is the most recent update time found among that row's maps;
+it is not the time of a periodic snapshot and does not make the cumulative row
+a time-series observation.
+
+Table 3.1. Attached kernel hooks and event-to-map updates
+---------------------------------------------------------
+| Subsystem | Exact SEC hook(s) / kernel symbol(s) | Event and update behavior |
+|---|---|---|
+| Scheduling / wakeup | tp/sched/sched_wakeup; tp/sched/sched_wakeup_new | On each wakeup, write bpf_ktime_get_ns() and target_cpu to wakeup_scratch, keyed by PID. A later switch consumes and deletes this timestamp. |
+| Scheduling / switch | tp/sched/sched_switch | On every switch, update incoming-task switch count and queue-wait latency, outgoing-task on-CPU runtime and voluntary/involuntary counter; sample the runqueue proxy. |
+| CPU migration | tp/sched/sched_migrate_task | Increment cpu_migrations for the PID and destination CPU key. |
+| Task cleanup | tp/sched/sched_process_exit | Delete the exiting PID's wakeup, syscall, on-CPU, and lock scratch entries. Aggregate rows are not deleted here. |
+| Page-fault events | tp/exceptions/page_fault_user; tp/exceptions/page_fault_kernel | Increment the corresponding memory-map counter on each event. The code names kernel faults major_faults; see the semantic limitation below. |
+| Kernel allocation/free | tp_btf/kmalloc; tp/kmem/kfree | On allocation, increment kmalloc_count and add bytes_alloc to total_alloc_bytes; count allocations of at least 2 MiB. On free, increment kfree_count. |
+| Syscall entry | tp/syscalls/sys_enter_read; tp/syscalls/sys_enter_write; tp/syscalls/sys_enter_mmap; tp/syscalls/sys_enter_futex; tp/syscalls/sys_enter_epoll_wait; tp/syscalls/sys_enter_ppoll | Save entry monotonic time and syscall ID in syscall_scratch, keyed by PID. This is an event-start record, not the aggregate latency update. |
+| Syscall exit | tp/syscalls/sys_exit_read; tp/syscalls/sys_exit_write; tp/syscalls/sys_exit_mmap; tp/syscalls/sys_exit_futex; tp/syscalls/sys_exit_epoll_wait; tp/syscalls/sys_exit_ppoll | Compute elapsed entry-to-exit time and update the aggregate syscall counters, latency sum/max, return-byte counts, and error count. |
+| Mutex wait proxy | kprobe/mutex_lock; kretprobe/mutex_lock | Save entry time by PID; at return, count a nonzero elapsed duration as a mutex contention and update wait sum/max. |
+| RW semaphore read wait proxy | kprobe/down_read; kretprobe/down_read | Save entry time by PID; at return, count a nonzero elapsed duration and update read-wait counters. |
+
+There are no source hooks for sys_enter_mprotect/sys_exit_mprotect, rwsem
+down_write, or a general-purpose syscall entry/exit stream. Although a
+SYS_mprotect constant exists, it is not used by an attached program. The six
+listed syscall families are the only ones contributing to syscall_count and
+syscall latency in this source. pinner.c attempts to attach each program and
+logs individual failures; the repository does not include a per-run attach
+log establishing that every hook attached successfully on the experimental
+kernel.
+
+Table 3.2. BPF map inventory
+----------------------------
+All HASH maps below have MAX_ENTRIES=65,536. “Immediate” means one update per
+matching event, not a periodic write. Aggregate map values are cumulative.
+
+| Map | Type; key -> value | Contents and update frequency | Persistence / reader role |
+|---|---|---|---|
+| sched_map | BPF_MAP_TYPE_HASH; struct agg_key {u32 pid, u32 cpu} -> sched_val | ctx_switches, voluntary_switches, involuntary_switches, cpu_migrations, total_runtime_ns, stall_ns, max_stall_ns, latency_count, runq_ratio_sum, runq_ratio_count, last_update_ns, comm[16]. Updated on switch/migration events. | Pinned by name under /sys/fs/bpf; read by reader.c. |
+| mem_map | BPF_MAP_TYPE_HASH; (pid,cpu) -> mem_val | minor_faults, major_faults, kmalloc_count, kfree_count, total_alloc_bytes, total_free_bytes, large_page_allocs, last_update_ns. Updated on page-fault, kmalloc, and kfree events. | Pinned; read by reader.c. total_free_bytes is declared but never incremented in the current BPF source. |
+| syscall_map | BPF_MAP_TYPE_HASH; (pid,cpu) -> syscall_val | total_count, latency_sum_ns, latency_max_ns, read_count, write_count, read_bytes, write_bytes, mmap_count, futex_count, futex_latency_sum_ns, epoll_count, epoll_latency_sum_ns, poll_count, error_count, last_update_ns. Updated on exits of the six instrumented syscall families. | Pinned; read by reader.c. |
+| lock_map | BPF_MAP_TYPE_HASH; (pid,cpu) -> lock_val | mutex_contentions, mutex_wait_sum_ns, mutex_wait_max_ns, rwsem_read_contentions, rwsem_read_wait_sum_ns, rwsem_write_contentions, rwsem_write_wait_sum_ns, rwsem_write_wait_max_ns, last_update_ns. Current attached lock probes populate mutex and rwsem-read fields only. | Pinned; read by reader.c. Write-side values are declared/exported but are not populated by the current hooks. |
+| wakeup_scratch | BPF_MAP_TYPE_HASH; u32 pid -> {u64 wakeup_ns, u32 wakeup_cpu} | Replaced at every wakeup/wakeup_new; consumed on a later sched_switch and removed on task exit. | Transient, not pinned/exported. wakeup_cpu is recorded but not used for the aggregate key. |
+| syscall_scratch | BPF_MAP_TYPE_HASH; u32 pid -> {u64 enter_ns, u64 nr} | Replaced at each instrumented syscall entry; consumed at matching exit. | Transient, not pinned/exported. One slot per PID. |
+| oncpu_scratch | BPF_MAP_TYPE_HASH; u32 pid -> {u64 start_ns} | Replaced when a task becomes the incoming task; consumed when it leaves the CPU. | Transient, not pinned/exported. |
+| lock_scratch | BPF_MAP_TYPE_HASH; u32 pid -> {u64 try_ns, u8 is_read} | Written at mutex_lock/down_read entry and consumed by the corresponding return probe. | Transient, not pinned/exported. |
+| runq_len | BPF_MAP_TYPE_PERCPU_ARRAY; u32 array index (only key 0) -> u64 | Intended per-CPU runnable-queue proxy, modified on sched_switch; used to compute runq_ratio=(queue_count*100)/16. | Not pinned/exported as a map; the derived average is exported from sched_map. |
+
+Timing and interpretation limitations to state or address
+---------------------------------------------------------
+1. The intended machine is documented in perf_monitor.bpf.c as an AMD Ryzen 7
+	4800HS, 8 cores / 16 hardware threads. NCPUS is hard-coded to 16. This is
+	an implementation assumption, not per-run host metadata; exact host/kernel
+	configuration was not written to the CSV.
+2. The runq_len code increments for a still-runnable previous task and then
+	immediately decrements when the next task leaves the queue. In the saved
+	CSV samples avg_runq_ratio is zero. Do not describe this as a validated
+	system-wide runqueue-depth measurement without correcting and revalidating
+	the counter logic.
+3. page_fault_kernel is an exception tracepoint and is not, by itself, a
+	reliable count of Linux major page faults (which refer to faults requiring
+	storage I/O). The exported major_faults name overstates what this hook
+	measures; describe it as kernel page-fault events or correct the source.
+4. mutex_lock/down_read elapsed function time is used as a contention/wait
+	proxy. A nonzero duration is not proof that the task blocked on a lock.
+	The current source does not instrument down_write, despite exporting
+	rwsem-write fields. The export also has total_free_bytes but does not fill
+	it. These should be disclosed or fixed before claiming complete lock and
+	allocation/free accounting.
+5. Scratch maps are keyed only by PID and hold one timestamp each. Concurrent
+	or nested events for one PID can overwrite an earlier timestamp. The
+	methods should call these event-derived estimates, not lossless per-event
+	tracing, unless this is addressed.
+
+
+COMMENT 4 — TRAINING FEATURES, LABEL, AND FEATURE DESCRIPTIONS
+=============================================================
+
+The v7 champion is binary: 0 = Not-High and 1 = High. Its label is derived
+from avg_stall_ns at a fixed threshold of 1,500,000 ns (1.5 ms), inclusive on
+the High side. The saved feature_cols_v7.json contains 33 input columns. The
+descriptions below follow the feature engineering in
+champion_model_train_v7.ipynb and the collector fields.
+
+Table 4.1. Features retained by the v7 classifier
+-------------------------------------------------
+| Feature | Description / computation |
+|---|---|
+| ctx_switches | Number of incoming scheduling events counted for this PID/CPU key. |
+| cpu_migrations | Number of sched_migrate_task events attributed to this PID and destination CPU. |
+| involuntary_switches | Outgoing switches where prev_state is not interruptible or uninterruptible; used as a preemption/CPU-contention proxy. |
+| voluntary_switches | Outgoing switches where prev_state is interruptible or uninterruptible; a sleep/yield proxy, not an explicit I/O-only count. |
+| involuntary_ratio | involuntary_switches divided by max(ctx_switches, 1). |
+| voluntary_ratio | voluntary_switches divided by max(ctx_switches, 1). |
+| avg_runq_ratio | Mean of integer runqueue-proxy samples, intended as runnable tasks per 16 logical CPUs times 100. In current collected output this is zero and is not a validated signal. |
+| runtime_per_switch | total_runtime_ns divided by max(ctx_switches, 1); mean measured on-CPU duration per counted switch. |
+| minor_faults | Count of page_fault_user events, as named in the collector. |
+| major_faults | Count of page_fault_kernel events in this implementation; not validated as Linux major-fault count. |
+| kmalloc_count | Number of observed tp_btf/kmalloc events. |
+| kfree_count | Number of observed tp/kmem/kfree events. |
+| total_alloc_bytes | Sum of bytes_alloc from observed kmalloc events. |
+| alloc_pressure | total_alloc_bytes divided by max(ctx_switches, 1). |
+| read_count | Number of completed instrumented read syscalls. |
+| write_count | Number of completed instrumented write syscalls. |
+| read_bytes | Sum of positive return values from instrumented read syscalls. |
+| write_bytes | Sum of positive return values from instrumented write syscalls. |
+| read_write_ratio | read_bytes divided by (write_bytes + 1). |
+| io_bytes_total | read_bytes + write_bytes. |
+| mutex_contentions | Count of observed mutex_lock calls with nonzero entry-to-return duration; a proxy as qualified in Comment 3. |
+| avg_mutex_wait_ns | mutex_wait_sum_ns divided by mutex_contentions; integer average, or zero if there are no counted events. |
+| rwsem_read_contentions | Count of observed down_read calls with nonzero entry-to-return duration. |
+| rwsem_write_contentions | Exported write-side counter; not populated by the current BPF hooks and therefore expected to be zero. |
+| lock_pressure | mutex_contentions + rwsem_read_contentions + rwsem_write_contentions. |
+| syscall_count | Number of completed calls among read, write, mmap, futex, epoll_wait, and ppoll only. |
+| avg_syscall_latency_ns | Integer mean entry-to-exit elapsed time over those instrumented syscalls. |
+| futex_count | Number of completed instrumented futex calls. |
+| log_total_runtime_ns | log(1 + total_runtime_ns). |
+| log_avg_syscall_latency_ns | log(1 + avg_syscall_latency_ns). |
+| log_max_syscall_latency_ns | log(1 + max_syscall_latency_ns). |
+| log_io_bytes_total | log(1 + io_bytes_total). |
+| log_total_alloc_bytes | log(1 + total_alloc_bytes). |
+
+“Log” features use the notebook's numpy.log1p transform. Ratios are created
+with denominators guarded as shown above. These engineered quantities are
+computed from the source fields before the explicit allowlist is applied.
+
+
+COMMENT 5 — DATASET GENERATION AND DESCRIPTIVE STATISTICS
+========================================================
+
+Dataset used by the v7 training notebook
+----------------------------------------
+The notebook concatenates perf_metrics1.csv and perf_metrics2.csv. Their
+combined input has 777,578 rows and 45 columns. The unit of observation is a
+PID-by-CPU aggregate row emitted by the reader for a capture session, not an
+independent time-window sample. Repeated rows can represent the same numeric
+PID on different CPUs or in different collection runs. The CSV has no stable
+run/session identifier, so exact process instances and independent executions
+cannot be reconstructed from these files alone.
+
+The notebook removes rows unless pid > 0, ctx_switches > 0, and latency_count
+> 0. This leaves 664,256 rows (113,322 removed). The retained sample is split
+stratifiably into 531,404 training rows (80%) and 132,852 test rows (20%),
+with random_state=42. The class prevalence is preserved in both partitions.
+
+| Quantity | Verified value |
+|---|---:|
+| Input CSV rows, combined | 777,578 |
+| Rows removed by eligibility filters | 113,322 |
+| Rows retained for labeling/modeling | 664,256 |
+| Not-High (avg_stall_ns < 1.5 ms) | 635,452 (95.7%) |
+| High (avg_stall_ns >= 1.5 ms) | 28,804 (4.3%) |
+| Training rows | 531,404 |
+| Test rows | 132,852 |
+| Distinct numeric PID values among retained CSV records | 122,790; not a count of unique process instances |
+| Distinct session_label strings | 50 workload-condition labels; not a count of executions |
+
+The 50 recorded condition labels span idle; CPU intensity (cpu_low,
+cpu_medium, cpu_high, cpu_overloaded, cpu_extreme, cpu_ultra, cpu_2x,
+cpu_4x, cpu_8x); memory/reclaim/swap/TLB pressure (mem_low, mem_high,
+mem_extreme, mem_thrashing, mem_reclaim, mem_heavy_reclaim,
+mem_swap_thrash, mem_swap_thrashing, mem_tlb_cache_miss); combined CPU-memory
+and CPU-I/O conditions (cpu_mem_2x, cpu_mem_4x, cpu_mem_8x,
+cpu_mem_extreme, cpu_mem_ultra, cpu_mem_io, cpu_mem_io_heavy,
+cpu_io_extreme); I/O (io_low, io_extreme, io_async_saturation); lock and
+scheduling contention (lock_low, lock_extreme, lock_heavy, lock_cpu_mix,
+lock_cpu_heavy, ctx_flood, context_switch_contention); compile workloads
+(compile_only, compile_sysbench, compile_blender); system-wide/mixed conditions
+(mixed_load, full_system, everything_extreme, everything_insane,
+everything_max); cache/stream contention (cache_contention,
+stream_memory_contention); and ML workloads (llm_inference, ml_training).
+There are also cpu_l3_cache_misses. Labels are taken from session_label and
+describe collection conditions; they are not the supervised target.
+
+The collection scripts show varying configured stressor timeouts: 150 seconds
+in autoData.sh and autoData2.sh, 240 seconds in autoData3.sh, 300 seconds in
+autoData4.sh, 75 seconds in autoData5.sh, and 1,500 seconds (25 minutes) in
+autoData6.sh. autoData6.sh defines three combined sessions:
+stream_memory_contention (CNN workload plus stream/VM stress), cache_contention
+(CNN workload plus cache/stream/VM stress), and context_switch_contention
+(CNN workload plus switch stress). In that script the ML workload starts
+first, stress-ng starts after a 10-second delay, and pinner starts 5 seconds
+after stress-ng. These are configured script values; the CSVs do not record
+which script version or exact measured duration generated each individual
+row. The pinner metadata file is temporary and is not embedded as per-row
+session metadata.
+
+The scripts and labels document workload families, but no authoritative run
+manifest was found that records the number of executions per condition, exact
+start/end times per execution, failed/repeated runs, or a stable run ID. Thus
+50 is the number of distinct condition labels, not “50 workloads” in the sense
+of 50 unique programs and not the execution count. Likewise, the capture rows
+cannot be counted as independent executions.
+
+Hardware/configuration evidence is limited: perf_monitor.bpf.c states that
+the intended host is an AMD Ryzen 7 4800HS with 8 cores / 16 threads and
+hard-codes NCPUS=16. Neither CPU model, kernel release/configuration, RAM,
+storage, nor actual online CPU count is stored in the training CSVs. Report
+the CPU model/core count only after confirming that the data were collected
+on that host; report the exact Linux kernel version and relevant configuration
+from experiment records if available. Otherwise mark them as not recorded.
+
+The split is a random, row-level stratified split, not a grouped split by
+execution, session, process, or workload label. Because run IDs are absent,
+the current test split does not establish generalization to an unseen run or
+unseen workload condition. This should be stated as a limitation and preferably
+addressed by a grouped holdout in a follow-up evaluation.
+
+
+COMMENT 6 — PREPROCESSING PIPELINE
+==================================
+
+The v7 notebook performs the following steps in order:
+1. Read perf_metrics1.csv and perf_metrics2.csv and concatenate them.
+2. Keep rows with pid > 0, ctx_switches > 0, and latency_count > 0. The last
+	condition ensures the target average has at least one measured latency.
+3. Engineer the switch ratios, runtime_per_switch, read_write_ratio,
+	io_bytes_total, alloc_pressure, and lock_pressure. Apply log1p to total
+	runtime, mean/max syscall latency, total I/O bytes, and total allocation
+	bytes.
+4. Select the fixed 33-column ALLOWED_FEATURES allowlist after checking that
+	it does not intersect the explicit leakage set.
+5. Set y=(avg_stall_ns >= 1,500,000).astype(int).
+6. Build X from the allowlisted columns and call X.fillna(0); cast split
+	feature arrays to float32.
+7. Make a stratified 80/20 row-level train/test split with random_state=42.
+	Grid search uses three-fold CV on the training partition only.
+
+No explicit numeric coercion, imputation fit on training statistics,
+standardization, min-max scaling, robust scaling, winsorization, clipping of
+outliers, or outlier-row removal is present in the champion pipeline. Missing
+feature values are set to zero. The ratio denominators are guarded in feature
+engineering; read_write_ratio uses write_bytes + 1. The observed input CSVs
+are integer/count-like numeric output, but the notebook does not document a
+separate missingness or outlier audit for the 33 inputs. Log1p is a skew-
+reducing transformation, not feature standardization.
+
+
+COMMENT 7 — TARGET LEAKAGE AUDIT
+================================
+
+The target is a thresholded transform of avg_stall_ns. Accordingly, the v7
+notebook explicitly excludes these ten target-derived columns from inputs:
+
+avg_stall_ns
+stall_ns
+max_stall_ns
+latency_count
+stall_per_switch
+log_stall_ns
+log_avg_stall_ns
+log_max_stall_ns
+stall_spike
+log_stall_spike
+
+The saved allowlist contains exactly the 33 features listed in Table 4.1.
+Other metadata/identity/label columns are also absent from the allowlist,
+including timestamp_ns, pid, cpu, comm, session_label, and the target y.
+The notebook asserts that the selected allowlist has an empty intersection
+with the ten-column leakage set; its saved run output says 33 features and no
+target-derived features.
+
+None of the retained features is computed from stall_ns, avg_stall_ns,
+max_stall_ns, or latency_count. They measure separate switch/runtime,
+allocation/fault, syscall/I/O, or lock-event signals. Such signals can be
+statistically correlated with scheduling delay, as expected for diagnosis,
+but the source does not directly reconstruct the target from them. The
+avg_runq_ratio caveat in Comment 3 remains: it is intended as an independent
+proxy but the current implementation produces zero in the saved examples.
+The current audit is a code-level direct-leakage check; it is not a proof of
+statistical independence and does not resolve row/session overlap between
+training and test data.
+
+
+COMMENT 8 — DEFINITION AND COMPUTATION OF AVERAGE STALL TIME
+===========================================================
+
+In this implementation, “stall time” means the task's observed runqueue
+waiting latency, not CPU execution time, I/O service time, or total process
+wall-clock duration. At sched_wakeup or sched_wakeup_new, the program stores
+the monotonic kernel timestamp from bpf_ktime_get_ns() for the woken PID. When
+that PID next appears as next_pid in sched_switch, it computes:
+
+	 stall_sample_ns = sched_switch_time_ns - stored_wakeup_time_ns
+	 stall_ns        = sum(stall_sample_ns over observed wakeup-to-run events)
+	 latency_count   = number of such observed events
+	 avg_stall_ns    = integer_floor(stall_ns / latency_count)
+
+The implementation uses unsigned integer nanoseconds and reader.c's integer
+division helper; when latency_count is zero, the exported average is zero.
+The average is accumulated per (PID, CPU) map key. A process scheduled on
+multiple CPUs can therefore yield multiple rows/labels; it is not first
+collapsed into one process-wide average. The collector consumes a stored
+wakeup timestamp at the next observed switch and has one wakeup slot per PID,
+so this is an event-derived estimate subject to the scratch-map limitations
+noted in Comment 3.
+
+The v7 class rule is:
+
+	 High     if avg_stall_ns >= 1,500,000 ns (>= 1.5 ms)
+	 Not-High if avg_stall_ns <  1,500,000 ns (<  1.5 ms)
+
+This 1.5 ms value is the target-label threshold. It is distinct from the
+Random Forest probability decision threshold of 0.5 used to turn predicted
+High probabilities into final binary predictions.
+
+
+COMMENT 9 — SMOTE DEFINITION AND USE IN THIS STUDY
+=================================================
+
+SMOTE means Synthetic Minority Over-sampling Technique. Given a minority-
+class training example x_i and one of its k nearest minority-class neighbors
+x_j, standard SMOTE creates a synthetic point along the segment between them:
+
+	 x_new = x_i + lambda * (x_j - x_i), where lambda is sampled uniformly
+	 from [0, 1].
+
+It increases minority representation by interpolation rather than merely
+duplicating minority rows. Any resampling must be applied only inside the
+training data (and inside each cross-validation training fold) to avoid
+leakage into validation/test data.
+
+SMOTE and variants were explored in earlier strategy-comparison notebooks,
+but the v7 champion documented here used the “Baseline (no handling)”
+strategy: no SMOTE, Borderline-SMOTE, ADASYN, or class_weight='balanced'. The
+training prevalence therefore remains naturally imbalanced at 4.3% High.
+Do not imply SMOTE was used to produce the reported champion metrics.
+
+
+COMMENT 10 — RANDOM FOREST HYPERPARAMETER SEARCH
+================================================
+
+The v7 champion notebook uses sklearn.model_selection.GridSearchCV with a
+RandomForestClassifier. It searches the Cartesian product below:
+
+| Hyperparameter | Tested values | Selected value |
+|---|---|---|
+| n_estimators (number of trees) | 200, 300, 500 | 500 |
+| max_depth | None, 12, 20 | 20 |
+| min_samples_leaf | 1, 5, 10 | 1 |
+
+The selection metric is High-class F1 (positive label 1), with three-fold
+cross-validation on the training partition; GridSearchCV refits the best
+configuration on the full training partition. RandomForestClassifier uses
+random_state=42, n_jobs=4, and class_weight=None. The best recorded CV
+High-class F1 is 0.737. The frozen test-set values in champion_metrics_v7.csv
+are accuracy=0.981, macro F1=0.867, weighted F1=0.979, High precision=0.882,
+High recall=0.642, High F1=0.743, High PR-AUC=0.831, and ROC-AUC=0.975.
+At the default probability threshold 0.5, the notebook reports the test
+confusion matrix (true rows, predicted columns; order Not-High, High):
+
+	 [[126597,   494],
+	  [  2060,  3701]]
+
+
+ITEMS TO CONFIRM BEFORE FINAL PAPER SUBMISSION
+==============================================
+
+The checked-in artifacts do not support exact values for the following
+requested dataset-generation details. Recover these from experiment logs,
+the original machine, or a new controlled collection; do not infer them from
+the number of CSV rows or from session_label frequencies:
+
+- Number of independent executions per condition and the total number of
+  executions. The CSV has no run ID and labels recur across files.
+- Exact experiment duration for each CSV session. The shell scripts contain
+  multiple timeout configurations, but the CSV does not identify which one
+  generated a particular row. The 1,500-second value is specifically the
+  autoData6.sh setting, not a proven duration for every record.
+- Number of unique process instances. The data expose PID values but have no
+  process-start identity or run ID; PID reuse prevents equating distinct PID
+  strings with unique process instances.
+- Actual per-run CPU model/core topology, Linux kernel version/configuration,
+  RAM/storage configuration, online CPU count, and successful probe-attach
+  list. The source's 8-core/16-thread Ryzen 7 4800HS comment and NCPUS=16 are
+  design assumptions, not per-run metadata.
+- Number of unique workload programs separately from the 50 session_label
+  condition strings; the labels are workload/condition descriptors, not a
+  structured workload manifest.
+
+For reproducibility, add a run manifest with one row per execution containing
+run_id, session_label, exact workload command/version, start/end monotonic or
+wall-clock time, requested and observed duration, repetitions/exit status,
+host CPU model and logical/physical core count, RAM, kernel release/config,
+online CPUs, BPF object revision, and per-probe attach outcome. Add run_id to
+every exported sample. If the manuscript retains claims about runqueue depth,
+major page faults, or lock contention, correct or qualify those measurements
+and regenerate the dataset/model results first.

@@ -1,0 +1,9 @@
+item,value_ms
+Historical threshold,1.5
+GMM intersection,0.056829212943784096
+KDE density valley,0.010243816746370983
+Otsu,2192.6279259778885
+Ordered change-point,0.04835449997673483
+MAD k=3,30.630843996971482
+IQR upper fence,44.359562436279404
+Session-GMM median,0.07929764102089217
