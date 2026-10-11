@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -111,9 +112,11 @@ class RealtimeReader:
         "session_label",
     ]
 
-    def __init__(self, config: RealtimeConfig | None = None) -> None:
+    def __init__(self, config: RealtimeConfig | None = None, *, collect_timings: bool = False) -> None:
         self.config = config or load_config()
         self.debug_enabled = os.getenv("REALTIME_DEBUG", "").lower() in {"1", "true", "yes", "on"}
+        self.collect_timings = collect_timings
+        self.last_stage_timings_ns: dict[str, int | None] = {}
 
         if not self.config.model_path or not os.path.exists(self.config.model_path):
             raise RuntimeError(f"Missing champion model for realtime inference: {self.config.model_path}")
@@ -422,7 +425,19 @@ class RealtimeReader:
             )
 
     def read_once(self) -> dict[str, Any]:
+        if self.collect_timings:
+            self.last_stage_timings_ns = {
+                "map_read_ns": None,
+                "aggregation_ns": None,
+                "feature_ns": None,
+                "rf_inference_ns": None,
+            }
+            stage_start_ns = time.perf_counter_ns()
+
         snapshot = self._read_snapshot()
+        if self.collect_timings:
+            self.last_stage_timings_ns["map_read_ns"] = time.perf_counter_ns() - stage_start_ns
+
         map_entry_counts = {name: len(entries) for name, entries in snapshot.items()}
         self._log_debug("entries read from each map: " + json.dumps(map_entry_counts, sort_keys=True))
 
@@ -432,13 +447,19 @@ class RealtimeReader:
                 f"({', '.join(f'{name}={count}' for name, count in map_entry_counts.items())})"
             )
 
+        if self.collect_timings:
+            stage_start_ns = time.perf_counter_ns()
         rows_df = self._rows_from_snapshot(snapshot)
         self._validate_reader_columns(rows_df)
         self._log_debug(f"reconstructed row count: {len(rows_df)}")
         if not rows_df.empty:
             self._log_debug("first reconstructed row: " + json.dumps(rows_df.iloc[0].to_dict(), default=str))
+        if self.collect_timings:
+            self.last_stage_timings_ns["aggregation_ns"] = time.perf_counter_ns() - stage_start_ns
 
         # v5: inline leakage-free feature engineering (notebook cells 6-7), not ml.features.engineering
+        if self.collect_timings:
+            stage_start_ns = time.perf_counter_ns()
         featured_df = engineer_features_v5(rows_df)
 
         # Verify every feature expected by the trained model exists
@@ -465,6 +486,8 @@ class RealtimeReader:
                 + json.dumps(feature_frame.iloc[0].to_dict(), default=str)
             )
         self._log_debug(f"feature matrix shape: {feature_frame.shape}")
+        if self.collect_timings:
+            self.last_stage_timings_ns["feature_ns"] = time.perf_counter_ns() - stage_start_ns
 
         return {
             "rows": rows_df,
@@ -477,12 +500,16 @@ class RealtimeReader:
         result = self.read_once()
         feature_frame = result["features"]
 
+        if self.collect_timings:
+            stage_start_ns = time.perf_counter_ns()
         model_input: Any = feature_frame
         if self.uses_scaled_input and self.scaler is not None:
             model_input = self.scaler.transform(feature_frame)
 
         predictions = self.model.predict(model_input)
         probabilities = self.model.predict_proba(model_input) if hasattr(self.model, "predict_proba") else None
+        if self.collect_timings:
+            self.last_stage_timings_ns["rf_inference_ns"] = time.perf_counter_ns() - stage_start_ns
 
         result["predictions"] = predictions
         result["probabilities"] = probabilities
