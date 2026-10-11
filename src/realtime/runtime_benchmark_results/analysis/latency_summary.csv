@@ -1,0 +1,2 @@
+n_cycles,mean_latency_ms,median_latency_ms,p95_latency_ms,p99_latency_ms,min_latency_ms,max_latency_ms,std_latency_ms
+62,392.0346930806452,384.92375649999997,564.4579037999999,630.97377249,192.620618,673.396095,111.55691193409889

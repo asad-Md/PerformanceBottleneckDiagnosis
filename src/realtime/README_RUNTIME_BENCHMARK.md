@@ -73,7 +73,7 @@ Record meaningful workload output such as the `stress-ng` metrics in a separate 
 
 ## eBPF plus diagnosis condition
 
-Start the existing pinner using its documented project procedure in a separate terminal. Launch the workload, run the current periodic diagnosis loop in benchmark mode, and run resource collection in a third process. The example uses a 1-second diagnosis interval; omit `--interval-s` to use the existing configured interval (five seconds by default), or pass `2` or `5`.
+Start the existing pinner using its documented project procedure in a separate terminal. Launch the workload, run the current periodic diagnosis loop in benchmark mode, and run resource collection in a third process. The monitored example uses a 5-second post-cycle diagnosis wait. The resource sampler continues sampling independently every 1 second.
 
 ```bash
 cd /path/to/PerformanceBottleneckDiagnosis
@@ -87,7 +87,7 @@ sudo -E "$(command -v python)" -m src.realtime.runtime_benchmark run \
   --run-id "$RUN_ID" --comparison-id "$PAIR_ID" --repetition-index 1 \
   --workload-type cpu --intensity medium --workload-workers 2 \
   --workload-duration-s 330 --workload-command "$WORKLOAD_COMMAND" \
-  --interval-s 1 --warmup-s 30 --duration-s 300 \
+  --interval-s 5 --warmup-s 30 --duration-s 300 \
   > "src/realtime/runtime_benchmark_results/${RUN_ID}.log" 2>&1 &
 MONITOR_PID=$!
 
@@ -96,7 +96,7 @@ python -m src.realtime.runtime_benchmark sample-resources \
   --comparison-id "$PAIR_ID" --repetition-index 1 \
   --condition ebpf_plus_diagnosis --workload-type cpu --intensity medium --workload-workers 2 \
   --workload-duration-s 330 --workload-command "$WORKLOAD_COMMAND" \
-  --interval-s 1 --warmup-s 30 --duration-s 300 --sample-interval-s 1 \
+  --interval-s 5 --warmup-s 30 --duration-s 300 --sample-interval-s 1 \
   --workload-pid "$WORKLOAD_PID" --monitor-pid "$MONITOR_PID"
 
 wait "$MONITOR_PID"
@@ -109,7 +109,7 @@ Only the `workload_only` and `ebpf_plus_diagnosis` conditions are implemented. D
 
 ## Commands and outputs
 
-`run` supports 1-, 2-, and 5-second intervals while retaining the existing config value when `--interval-s` is omitted. Its duration is the measured window after warm-up; a cycle that starts before the end is allowed to finish. The current post-cycle wait remains the scheduling policy.
+`run` supports 1-, 2-, and 5-second intervals while retaining the existing config value when `--interval-s` is omitted. Its duration is the measured window after warm-up; a cycle that starts before the end is allowed to finish. The configured interval is a fixed wait after each completed cycle, so observed start-to-start cadence is approximately the diagnosis cycle duration plus the configured wait. The one-second `--sample-interval-s` controls resource sampling independently of diagnosis scheduling.
 
 After collecting real runs:
 
@@ -228,7 +228,7 @@ sudo -E sh -c 'echo $$ > "$1"; shift; exec "$@"' sh "$PID_FILE" \
   --run-id "$RUN_ID" --comparison-id "$PAIR_ID" --repetition-index 1 \
   --workload-type cpu --intensity 2-workers --workload-workers 2 \
   --workload-duration-s 180 --workload-command "$WORKLOAD_COMMAND" \
-  --interval-s 1 --warmup-s 20 --duration-s 160 \
+  --interval-s 5 --warmup-s 20 --duration-s 160 \
   > "src/realtime/runtime_benchmark_results/${RUN_ID}.log" 2>&1 &
 
 # Wait until the diagnosis process has written its process ID.
@@ -241,7 +241,7 @@ python -m src.realtime.runtime_benchmark sample-resources \
   --comparison-id "$PAIR_ID" --repetition-index 1 \
   --condition ebpf_plus_diagnosis --workload-type cpu --intensity 2-workers --workload-workers 2 \
   --workload-duration-s 180 --workload-command "$WORKLOAD_COMMAND" \
-  --interval-s 1 --warmup-s 20 --duration-s 160 --sample-interval-s 1 \
+  --interval-s 5 --warmup-s 20 --duration-s 160 --sample-interval-s 1 \
   --workload-pid "$WORKLOAD_PID" --monitor-pid "$MONITOR_PID"
 
 wait "$WORKLOAD_PID"
