@@ -141,3 +141,134 @@ Artifacts:
 Report diagnosis-path latency, full cycle duration, observed start-to-start interval, and resource overhead as separate measurements. Neither inference time nor cycle cadence measures bottleneck detection delay. No trustworthy independent bottleneck-onset timestamp or process-ground-truth association is implemented here, so detection delay is not estimated.
 
 The inspected reader does not clear maps or compute interval deltas. Repeated model inputs may therefore reflect overlapping/cumulative map state. Map definitions and pinner behavior must be verified against their source before claiming that cycles represent fresh windows. A lower cycle latency alone is not evidence that monitoring has low overhead; use matched workload-only and monitored repetitions and report the process and host measurements.
+
+
+
+
+###################################################################
+
+
+Yes. For **one quick CPU comparison**, run the same workload twice: once without diagnosis (baseline), then once with diagnosis (monitored). Each run is about **3 minutes**, so the total is about **6 minutes**, plus setup. This is a pilot, not enough repetitions for a strong paper claim.
+
+Use **two Linux terminal windows**. The commands below assume your Linux project folder is `/home/asad/Code/FYP/PerformanceBottleneckDiagnosis`, as shown in your instructions.
+
+## First: prepare Terminal 2
+
+Open Terminal 2 and enter:
+
+```bash
+cd /home/asad/Code/FYP/PerformanceBottleneckDiagnosis
+source venv/bin/activate
+command -v stress-ng
+command -v bpftool
+```
+
+Both `command -v` checks should print a path. If `stress-ng` is missing, stop before running the workload. Also make sure the project’s usual Python dependencies are available in the activated `venv`.
+
+## Run 1: baseline — Terminal 2 only
+
+Do **not** start the pinner for this run. Paste this whole block into Terminal 2:
+
+```bash
+cd /home/asad/Code/FYP/PerformanceBottleneckDiagnosis
+source venv/bin/activate
+
+RUN_ID=cpu-baseline-r1
+PAIR_ID=cpu-pilot-r1
+WORKLOAD_COMMAND='stress-ng --cpu 2 --cpu-method matrixprod --timeout 180s --metrics-brief'
+
+stress-ng --cpu 2 --cpu-method matrixprod --timeout 180s --metrics-brief &
+WORKLOAD_PID=$!
+
+python -m src.realtime.runtime_benchmark sample-resources \
+  --run-id "$RUN_ID" --comparison-id "$PAIR_ID" --repetition-index 1 \
+  --condition workload_only --workload-type cpu --intensity 2-workers --workload-workers 2 \
+  --workload-duration-s 180 --workload-command "$WORKLOAD_COMMAND" \
+  --warmup-s 20 --duration-s 160 --sample-interval-s 1 \
+  --workload-pid "$WORKLOAD_PID"
+
+wait "$WORKLOAD_PID"
+```
+
+This starts a two-worker CPU workload and samples the computer while it runs. The workload is capped at 180 seconds. The sampler treats the first 20 seconds as warm-up and measures the remaining 160 seconds. Keep Terminal 2 open until it finishes.
+
+## Run 2: monitored — start the pinner, then use both terminals
+
+**Terminal 1:** Open a second terminal, then enter:
+
+```bash
+cd /home/asad/Code/FYP/PerformanceBottleneckDiagnosis
+sudo ./pinner
+```
+
+Leave Terminal 1 open with the pinner running. It’s needed for the monitored run, not for the baseline.
+
+**Terminal 2:** After Run 1 has finished and the pinner is running in Terminal 1, paste this block into Terminal 2:
+
+```bash
+cd /home/asad/Code/FYP/PerformanceBottleneckDiagnosis
+source venv/bin/activate
+
+# Ask for sudo authentication now, while this command is in the foreground.
+sudo -v
+
+mkdir -p src/realtime/runtime_benchmark_results
+
+RUN_ID=cpu-monitored-r1
+PAIR_ID=cpu-pilot-r1
+WORKLOAD_COMMAND='stress-ng --cpu 2 --cpu-method matrixprod --timeout 180s --metrics-brief'
+PID_FILE="/tmp/${RUN_ID}.pid"
+
+stress-ng --cpu 2 --cpu-method matrixprod --timeout 180s --metrics-brief &
+WORKLOAD_PID=$!
+
+# Start diagnosis with elevated permissions and save the Python process ID for sampling.
+sudo -E sh -c 'echo $$ > "$1"; shift; exec "$@"' sh "$PID_FILE" \
+  "$(command -v python)" -m src.realtime.runtime_benchmark run \
+  --run-id "$RUN_ID" --comparison-id "$PAIR_ID" --repetition-index 1 \
+  --workload-type cpu --intensity 2-workers --workload-workers 2 \
+  --workload-duration-s 180 --workload-command "$WORKLOAD_COMMAND" \
+  --interval-s 1 --warmup-s 20 --duration-s 160 \
+  > "src/realtime/runtime_benchmark_results/${RUN_ID}.log" 2>&1 &
+
+# Wait until the diagnosis process has written its process ID.
+while [ ! -s "$PID_FILE" ]; do sleep 0.2; done
+MONITOR_PID=$(cat "$PID_FILE")
+
+# Sample workload, diagnosis process, and system resources while they run.
+python -m src.realtime.runtime_benchmark sample-resources \
+  --run-id "${RUN_ID}-resources" --parent-run-id "$RUN_ID" \
+  --comparison-id "$PAIR_ID" --repetition-index 1 \
+  --condition ebpf_plus_diagnosis --workload-type cpu --intensity 2-workers --workload-workers 2 \
+  --workload-duration-s 180 --workload-command "$WORKLOAD_COMMAND" \
+  --interval-s 1 --warmup-s 20 --duration-s 160 --sample-interval-s 1 \
+  --workload-pid "$WORKLOAD_PID" --monitor-pid "$MONITOR_PID"
+
+wait "$WORKLOAD_PID"
+wait
+```
+
+Leave the pinner running until the monitored block completes. Then stop it using its normal shutdown method; don’t manually clear or remove maps.
+
+## After both runs
+
+In Terminal 2, run:
+
+```bash
+cd /home/asad/Code/FYP/PerformanceBottleneckDiagnosis
+source venv/bin/activate
+
+python -m src.realtime.summarize_runtime_benchmark \
+  --results-dir src/realtime/runtime_benchmark_results
+
+python -m src.realtime.plot_runtime_benchmark \
+  --results-dir src/realtime/runtime_benchmark_results
+```
+
+Your CSVs and report will be under `src/realtime/runtime_benchmark_results/`. Open `realtime_performance_analysis.ipynb` and run it with `src/realtime` as its working directory.
+
+This compares **one CPU workload** in two conditions. To keep this short, skip additional workload types for now. A limitation: this single matched pair is useful for checking that collection and analysis work, but not for claiming repeatable overhead measurements.
+
+**Task completed:**
+
+Explained the whole one-time Linux CPU pilot with separate Terminal 1 (pinner) and Terminal 2 (setup, baseline, monitored run, and analysis), including explicit commands and expected wait/order. Kept each workload bounded to 180 seconds with a 20-second warm-up, matched baseline/monitored identifiers, and clarified that a single pair is only a collection pilot—not robust publication evidence.
