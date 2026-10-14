@@ -205,6 +205,12 @@ def capture_environment(config: RealtimeConfig, workload_command: str | None) ->
         "model_sha256": _file_sha256(config.model_path),
         "feature_columns_filename": Path(config.feature_cols_path).name if config.feature_cols_path else None,
         "feature_columns_sha256": _file_sha256(config.feature_cols_path),
+        "decision_threshold_filename": (
+            Path(config.label_thresholds_path).name if config.label_thresholds_path else None
+        ),
+        "decision_threshold_sha256": _file_sha256(config.label_thresholds_path),
+        "bpf_object_filename": Path(config.bpf_object_path).name if config.bpf_object_path else None,
+        "bpf_object_sha256": _file_sha256(config.bpf_object_path),
         "attribution_model_filename": (
             Path(config.attribution_model_path).name if config.attribution_model_path else None
         ),
@@ -393,6 +399,11 @@ def run_diagnosis(args: argparse.Namespace) -> int:
         predictor = Predictor(config, benchmark_mode=True, cleanup_maps_on_exit=False)
         run_config["active_model_class"] = type(predictor.model).__name__
         run_config["active_attribution_model_class"] = type(predictor.attributor.model).__name__
+        run_config["active_model_features"] = list(predictor.reader.model_features)
+        run_config["active_attribution_features"] = list(predictor.attributor.feature_columns)
+        run_config["active_decision_probability_threshold"] = (
+            predictor.reader.decision_probability_threshold
+        )
         _write_json_atomic(run_path, run_config)
 
         def record_cycle(measurement: dict[str, object]) -> None:

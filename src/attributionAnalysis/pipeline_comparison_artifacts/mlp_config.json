@@ -1,0 +1,19 @@
+{
+  "model_type": "PyTorch MLP",
+  "input_dim": 20,
+  "hidden_layers": [
+    64,
+    24,
+    16
+  ],
+  "output_dim": 6,
+  "activation": "ReLU",
+  "output_activation": "Sigmoid",
+  "loss": "BCEWithLogitsLoss",
+  "optimizer": "Adam",
+  "learning_rate": 0.001,
+  "epochs": 200,
+  "batch_size": 256,
+  "threshold": 0.5,
+  "random_state": 42
+}

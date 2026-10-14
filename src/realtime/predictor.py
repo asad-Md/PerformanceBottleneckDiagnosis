@@ -47,6 +47,11 @@ class Predictor:
                 from realtime.attribution_model import BottleneckAttributor
 
             self.attributor = BottleneckAttributor(self.config)
+            if self.attributor.feature_columns != self.reader.model_features:
+                raise RuntimeError(
+                    "Realtime classifier and attribution models must use the same ordered feature list; "
+                    f"classifier={self.reader.model_features}; attribution={self.attributor.feature_columns}"
+                )
 
         if not self.config.model_path or not os.path.exists(self.config.model_path):
             raise RuntimeError(f"Missing model for realtime inference: {self.config.model_path}")

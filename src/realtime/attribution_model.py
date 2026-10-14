@@ -100,7 +100,12 @@ class BottleneckAttributor:
         if not np.isfinite(feature_values).all():
             raise RuntimeError("Realtime attribution features contain NaN or infinite values")
 
-        scaled_values = self.scaler.transform(feature_frame)
+        scaler_input = (
+            feature_frame
+            if hasattr(self.scaler, "feature_names_in_")
+            else feature_values
+        )
+        scaled_values = self.scaler.transform(scaler_input)
         features = torch.as_tensor(np.asarray(scaled_values, dtype=np.float32))
         with torch.inference_mode():
             probabilities = torch.sigmoid(self.model(features)).cpu().numpy()

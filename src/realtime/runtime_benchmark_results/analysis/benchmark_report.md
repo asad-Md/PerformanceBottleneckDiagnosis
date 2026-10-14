@@ -4,11 +4,11 @@ This report is generated from the raw cycle/resource CSV files and run JSON meta
 
 ## Methodology and metric boundaries
 
-- The existing predictor repeatedly reads pinned maps and waits after each cycle; observed start-to-start cadence includes work plus the fixed post-cycle interval.
+- The predictor snapshots and deletes captured pinned-map entries. Polling targets the configured start-to-start interval; overruns start the next cycle immediately.
 - Detection-path latency measures map reads through the existing classifier prediction; full cycle duration also includes diagnostic formatting and console output.
 - Resource samples use `/proc/stat`, `/proc/meminfo`, and selected `/proc/<pid>/stat` fields. Host CPU is 0-100%; process CPU is percent of one logical CPU; memory values are resident/used bytes.
-- Map snapshots are neither cleared nor differenced by the reader; do not treat cycles as independent windows until map update semantics are verified.
-- A cycle deadline and MLP attribution stage are not defined in the current active realtime path. Empty fields are unavailable, not zero.
+- Clearing map entries is not atomic with kernel-side updates, so a racing update can be lost and snapshots are not guaranteed to be non-overlapping.
+- The benchmark's MLP attribution stage is conditional on qualifying rows. Empty fields are unavailable or indicate that no row qualified, not zero.
 - Detection delay is not measured: no independently verified bottleneck onset timestamp is associated with a diagnosed process.
 
 ## Run status
@@ -22,12 +22,12 @@ Failed, incomplete, and interrupted runs remain in `run_summary.csv`; interpret 
 ### cpu / medium / ebpf_plus_diagnosis / configured interval 5000.0 ms
 
 - Runs: 1; completed: 1; incomplete/failed: 0.
-- Diagnosis cycles: 56.
-- Pooled cycle latency median/p95: 391.865494 / 553.25643775 ms.
-- Median of per-run cycle medians: 391.865494 ms; between-run standard deviation of run medians: not measured ms.
-- Median of per-run p95 cycle latency: 553.25643775 ms.
-- Actual start-to-start interval median/p95: 5386.9611165 / 5553.412761250001 ms.
-- Median records processed per cycle: 3795.5.
+- Diagnosis cycles: 60.
+- Pooled cycle latency median/p95: 106.495499 / 109.80345725 ms.
+- Median of per-run cycle medians: 106.495499 ms; between-run standard deviation of run medians: not measured ms.
+- Median of per-run p95 cycle latency: 109.80345725 ms.
+- Actual start-to-start interval median/p95: 5000.084627 / 5000.1469130000005 ms.
+- Median records processed per cycle: 229.0.
 - Missed-deadline rate: not measured (not measured means no deadline was defined).
 
 ### cpu / medium / workload_only / configured interval nan ms
@@ -46,8 +46,8 @@ Failed, incomplete, and interrupted runs remain in `run_summary.csv`; interpret 
 ### cpu / medium
 
 - Matched repetitions: 1.
-- Mean host CPU change: 0.015673724521423793 percentage points (between-repetition SD: not measured).
-- Mean host memory change: 1063448576.0 bytes (between-repetition SD: not measured).
-- Mean monitoring-process CPU: not measured% of one logical CPU.
-- Mean monitoring-process RSS: not measured bytes.
+- Mean host CPU change: 0.0468066833229237 percentage points (between-repetition SD: not measured).
+- Mean host memory change: 1000439808.0 bytes (between-repetition SD: not measured).
+- Mean monitoring-process CPU: 0.0% of one logical CPU.
+- Mean monitoring-process RSS: 1193455616.0 bytes.
 

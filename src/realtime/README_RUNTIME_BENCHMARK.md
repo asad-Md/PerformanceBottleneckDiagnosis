@@ -1,6 +1,6 @@
 # Realtime diagnosis runtime benchmark
 
-This benchmark measures the existing `Predictor` loop. It does not load eBPF programs, start workloads, or change model inputs. It uses the predictor's map snapshot/reset behavior and polling schedule. Run it manually on the Linux host where the existing pinned maps and model environment are available.
+This benchmark measures the `Predictor` loop with the v7.2 SHAP-reduced classifier and matching attribution MLP. It does not load eBPF programs or start workloads; it uses the predictor's map snapshot/reset behavior and polling schedule. Run it manually on the Linux host where the realtime collector's pinned maps and model artifacts are available.
 
 Results are written to `src/realtime/runtime_benchmark_results/` by default. Run the analysis notebook with `src/realtime/` as its working directory so its default `runtime_benchmark_results/` path resolves to that folder.
 
@@ -31,9 +31,9 @@ command -v stress-ng
 test -r /proc/stat && test -r /proc/meminfo
 ```
 
-The benchmark also requires PyTorch, the `baseline_original_best.pt` checkpoint, the notebook-generated attribution feature/target column JSON files, and the matching `feature_scaler.pkl` saved by `bottleneck_attrition_analysis_balanced.ipynb`. The checkpoint and column files default to `src/attributionAnalysis/pipeline_comparison_artifacts/`; the scaler is expected at the same location. Supply the scaler there or set `REALTIME_ATTRIBUTION_SCALER_PATH` to its location. The model, feature-column, and target-column paths can be overridden with `REALTIME_ATTRIBUTION_MODEL_PATH`, `REALTIME_ATTRIBUTION_FEATURE_COLS_PATH`, and `REALTIME_ATTRIBUTION_TARGET_COLS_PATH`. Missing or incompatible artifacts stop the benchmark with an explicit error rather than silently skipping attribution.
+The benchmark also requires PyTorch, the `baseline_original_best.pt` checkpoint, the v2 notebook-generated attribution feature/target column JSON files, and the matching `feature_scaler.pkl` saved by `bottleneck_attrition_analysis_v2.ipynb`. The checkpoint and column files default to `src/attributionAnalysis/pipeline_comparison_artifacts/`; the scaler is expected at the same location. The notebook trains the attribution MLP on the same ordered 20 inputs as the SHAP-reduced classifier. The classifier, feature-list, and threshold defaults are `src/realtime/champion_model_v7_shap.pkl`, `feature_cols_v7_shap.json`, and `label_thresholds_v7_shap.json`. The default collector object is `src/realtime/realtime_monitor.bpf.o`. See [README.md](./README.md) for the BPF object and pinner build/setup steps. Missing or incompatible artifacts stop the benchmark with an explicit error rather than silently skipping either model.
 
-The existing pinner and pinned maps need their normal setup and privileges. Follow the project's current pinner procedure; the benchmark runner itself does not call the pinner. It intentionally skips the predictor's normal shutdown unpin operation so a benchmark exit does not remove pins needed by another process. The predictor deletes captured entries after each snapshot; do not manually clear maps while the benchmark is running. Use the established pinner/session lifecycle for a fresh capture where needed.
+The reduced realtime pinner and pinned maps need their normal setup and privileges. Start `realtime_pinner` with the matching `realtime_monitor.bpf.o` before diagnosis benchmarking; the benchmark runner itself does not call the pinner. It intentionally skips the predictor's normal shutdown unpin operation so a benchmark exit does not remove pins needed by another process. The predictor deletes captured entries after each snapshot; do not manually clear maps while the benchmark is running. Use the established pinner/session lifecycle for a fresh capture where needed.
 
 `stress-ng` is optional. If it is unavailable, use an existing project workload and record its exact command. CPU, memory, and mixed examples below are commands for the user to launch manually; the benchmark never launches or terminates them.
 
@@ -78,7 +78,7 @@ Record meaningful workload output such as the `stress-ng` metrics in a separate 
 
 ## eBPF plus diagnosis condition
 
-Start the existing pinner using its documented project procedure in a separate terminal. Launch the workload, run the current periodic diagnosis loop in benchmark mode, and run resource collection in a third process. The monitored example uses a 5-second post-cycle diagnosis wait. The resource sampler continues sampling independently every 1 second.
+Start `realtime_pinner` with `realtime_monitor.bpf.o` as described in [README.md](./README.md) before diagnosis. Launch the workload, run the periodic diagnosis loop in benchmark mode, and run resource collection in a third process. The monitored example uses a 5-second post-cycle diagnosis wait. The resource sampler continues sampling independently every 1 second.
 
 ```bash
 cd /path/to/PerformanceBottleneckDiagnosis
@@ -203,8 +203,8 @@ This starts a two-worker CPU workload and samples the computer while it runs. Th
 **Terminal 1:** Open a second terminal, then enter:
 
 ```bash
-cd /home/asad/Code/FYP/PerformanceBottleneckDiagnosis
-sudo ./pinner
+cd /home/asad/Code/FYP/PerformanceBottleneckDiagnosis/src/realtime
+sudo ./realtime_pinner --obj ./realtime_monitor.bpf.o
 ```
 
 Leave Terminal 1 open with the pinner running. It’s needed for the monitored run, not for the baseline.
@@ -254,7 +254,7 @@ wait "$WORKLOAD_PID"
 wait
 ```
 
-Leave the pinner running until the monitored block completes. Then stop it using its normal shutdown method; don’t manually clear or remove maps.
+Leave `realtime_pinner` running until the monitored block completes. Then stop it with Ctrl+C; don’t manually clear or remove maps.
 
 ## After both runs
 

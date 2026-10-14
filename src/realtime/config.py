@@ -9,6 +9,7 @@ from pathlib import Path
 class RealtimeConfig:
     polling_interval_s: float = 5.0
     pin_base: str = "/sys/fs/bpf"
+    bpf_object_path: str = ""
     sched_map_path: str = "/sys/fs/bpf/sched_map"
     mem_map_path: str = "/sys/fs/bpf/mem_map"
     syscall_map_path: str = "/sys/fs/bpf/syscall_map"
@@ -31,46 +32,28 @@ def load_config() -> RealtimeConfig:
 
     cfg.polling_interval_s = float(os.getenv("REALTIME_POLLING_INTERVAL_S", "5.0"))
     cfg.pin_base = os.getenv("REALTIME_PIN_BASE", "/sys/fs/bpf")
+    cfg.bpf_object_path = os.getenv(
+        "REALTIME_BPF_OBJECT_PATH",
+        str(local_dir / "realtime_monitor.bpf.o"),
+    )
     cfg.sched_map_path = os.getenv("REALTIME_SCHED_MAP", f"{cfg.pin_base}/sched_map")
     cfg.mem_map_path = os.getenv("REALTIME_MEM_MAP", f"{cfg.pin_base}/mem_map")
     cfg.syscall_map_path = os.getenv("REALTIME_SYSCALL_MAP", f"{cfg.pin_base}/syscall_map")
     cfg.lock_map_path = os.getenv("REALTIME_LOCK_MAP", f"{cfg.pin_base}/lock_map")
 
-    model_candidates = [
-        os.getenv("REALTIME_MODEL_PATH", ""),
-        str(local_dir / "champion_model_v7.pkl"),
-    ]
-    for candidate in model_candidates:
-        if candidate and os.path.exists(candidate):
-            cfg.model_path = candidate
-            break
-
-    scaler_candidates = [
-        os.getenv("REALTIME_SCALER_PATH", ""),
-        str(local_dir / "feature_scaler_v7.pkl"),
-    ]
-    for candidate in scaler_candidates:
-        if candidate and os.path.exists(candidate):
-            cfg.scaler_path = candidate
-            break
-
-    feature_candidates = [
-        os.getenv("REALTIME_FEATURE_COLS_PATH", ""),
-        str(local_dir / "feature_cols_v7.json"),
-    ]
-    for candidate in feature_candidates:
-        if candidate and os.path.exists(candidate):
-            cfg.feature_cols_path = candidate
-            break
-
-    threshold_candidates = [
-        os.getenv("REALTIME_LABEL_THRESHOLDS_PATH", ""),
-        str(local_dir / "label_thresholds_v7.json"),
-    ]
-    for candidate in threshold_candidates:
-        if candidate and os.path.exists(candidate):
-            cfg.label_thresholds_path = candidate
-            break
+    cfg.model_path = os.getenv(
+        "REALTIME_MODEL_PATH",
+        str(local_dir / "champion_model_v7_shap.pkl"),
+    )
+    cfg.scaler_path = os.getenv("REALTIME_SCALER_PATH", "")
+    cfg.feature_cols_path = os.getenv(
+        "REALTIME_FEATURE_COLS_PATH",
+        str(local_dir / "feature_cols_v7_shap.json"),
+    )
+    cfg.label_thresholds_path = os.getenv(
+        "REALTIME_LABEL_THRESHOLDS_PATH",
+        str(local_dir / "label_thresholds_v7_shap.json"),
+    )
 
     attribution_dir = root / "attributionAnalysis" / "pipeline_comparison_artifacts"
     cfg.attribution_model_path = os.getenv(

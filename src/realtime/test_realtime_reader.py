@@ -6,10 +6,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
+import torch
 
-from src.realtime.realtime_reader import RealtimeReader
+from src.realtime.attribution_model import BottleneckAttributor
+from src.realtime.realtime_reader import RealtimeReader, engineer_features_v5
 from src.realtime.utils import run_bpftool_clear
+from src.realtime.config import load_config
 
 
 class BpfMapClearTests(unittest.TestCase):
@@ -108,6 +112,7 @@ class SnapshotResetTests(unittest.TestCase):
         result = reader.read_once()
 
         self.assertEqual(events, [*(f"dump:{path}" for path in map_paths), "clear", "aggregate", "feature"])
+        self.assertEqual(result["rows"]["feature"].tolist(), [1])
         self.assertEqual(result["features"]["feature"].tolist(), [1])
 
     @patch("src.realtime.realtime_reader.time.perf_counter_ns", side_effect=[100, 180])
@@ -118,6 +123,113 @@ class SnapshotResetTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "reset failed"):
             reader.read_once()
         self.assertEqual(reader.last_stage_timings_ns["map_read_ns"], 80)
+
+
+class ShapFeaturePipelineTests(unittest.TestCase):
+    def test_config_defaults_to_the_shap_retrained_artifacts(self) -> None:
+        config = load_config()
+
+        self.assertEqual(Path(config.model_path).name, "champion_model_v7_shap.pkl")
+        self.assertEqual(Path(config.feature_cols_path).name, "feature_cols_v7_shap.json")
+        self.assertEqual(Path(config.label_thresholds_path).name, "label_thresholds_v7_shap.json")
+        self.assertEqual(Path(config.bpf_object_path).name, "realtime_monitor.bpf.o")
+        self.assertEqual(Path(config.attribution_model_path).name, "baseline_original_best.pt")
+
+    def test_engineering_produces_the_selected_classifier_features(self) -> None:
+        rows = pd.DataFrame([{
+            "ctx_switches": 4,
+            "involuntary_switches": 2,
+            "voluntary_switches": 1,
+            "cpu_migrations": 3,
+            "total_runtime_ns": 100,
+            "minor_faults": 5,
+            "major_faults": 6,
+            "mutex_contentions": 7,
+            "rwsem_read_contentions": 8,
+            "rwsem_write_contentions": 9,
+            "avg_mutex_wait_ns": 10,
+            "syscall_count": 11,
+            "kfree_count": 12,
+            "total_alloc_bytes": 13,
+            "read_bytes": 14,
+            "write_bytes": 15,
+            "max_syscall_latency_ns": 16,
+            "avg_syscall_latency_ns": 17,
+        }])
+
+        featured = engineer_features_v5(rows)
+
+        expected = {
+            "runtime_per_switch",
+            "cpu_migrations",
+            "involuntary_ratio",
+            "ctx_switches",
+            "voluntary_switches",
+            "voluntary_ratio",
+            "log_total_runtime_ns",
+            "minor_faults",
+            "involuntary_switches",
+            "mutex_contentions",
+            "rwsem_read_contentions",
+            "avg_mutex_wait_ns",
+            "syscall_count",
+            "lock_pressure",
+            "kfree_count",
+            "alloc_pressure",
+            "read_write_ratio",
+            "log_max_syscall_latency_ns",
+            "log_avg_syscall_latency_ns",
+            "major_faults",
+        }
+        self.assertTrue(expected.issubset(featured.columns))
+        self.assertEqual(featured.loc[0, "runtime_per_switch"], 25)
+        self.assertEqual(featured.loc[0, "lock_pressure"], 24)
+        self.assertEqual(featured.loc[0, "read_write_ratio"], 14 / 16)
+
+    def test_predict_uses_saved_binary_decision_threshold(self) -> None:
+        class ThresholdModel:
+            classes_ = [0, 1]
+
+            def predict_proba(self, _features):
+                return np.array([[0.65, 0.35], [0.60, 0.40]])
+
+            def predict(self, _features):
+                return [0, 0]
+
+        reader = RealtimeReader.__new__(RealtimeReader)
+        reader.collect_timings = False
+        reader.model = ThresholdModel()
+        reader.uses_scaled_input = False
+        reader.scaler = None
+        reader.decision_probability_threshold = 0.37
+        reader.read_once = lambda: {"features": pd.DataFrame({"feature": [1, 2]})}
+
+        result = reader.predict()
+
+        self.assertEqual(result["predictions"].tolist(), [0, 1])
+
+
+class AttributionScalerCompatibilityTests(unittest.TestCase):
+    def test_transform_matches_scaler_training_input_format(self) -> None:
+        class ArrayScaler:
+            def transform(self, values):
+                self.values = values
+                return values
+
+        class Model(torch.nn.Module):
+            def forward(self, features):
+                return torch.zeros((features.shape[0], 1))
+
+        attributor = BottleneckAttributor.__new__(BottleneckAttributor)
+        attributor.feature_columns = ["feature"]
+        attributor.target_columns = ["target"]
+        attributor.scaler = ArrayScaler()
+        attributor.model = Model()
+
+        result = attributor.predict(pd.DataFrame({"feature": [1.0]}))
+
+        self.assertIsInstance(attributor.scaler.values, np.ndarray)
+        self.assertEqual(result.shape, (1, 1))
 
 
 if __name__ == "__main__":

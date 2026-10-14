@@ -1,0 +1,22 @@
+[
+  "runtime_per_switch",
+  "cpu_migrations",
+  "involuntary_ratio",
+  "ctx_switches",
+  "voluntary_switches",
+  "voluntary_ratio",
+  "log_total_runtime_ns",
+  "minor_faults",
+  "involuntary_switches",
+  "mutex_contentions",
+  "rwsem_read_contentions",
+  "avg_mutex_wait_ns",
+  "syscall_count",
+  "lock_pressure",
+  "kfree_count",
+  "alloc_pressure",
+  "read_write_ratio",
+  "log_max_syscall_latency_ns",
+  "log_avg_syscall_latency_ns",
+  "major_faults"
+]

@@ -18,25 +18,17 @@ if str(ROOT) not in sys.path:
 from .config import RealtimeConfig, load_config
 from .utils import run_bpftool_clear, run_bpftool_dump, load_feature_columns, load_label_thresholds
 
-# Matches bottleneck_diagnosis_v5.ipynb Section 1 (class_names_map / TARGET_NAMES).
+# Keeps the legacy multiclass labels available for older classifier artifacts.
 #
-# IMPORTANT: these are STALL-SEVERITY buckets, derived purely from percentile thresholds
-# (p50/p85/p97) on avg_stall_ns (see label_thresholds_v5.json). They are NOT the workload/
-# stress-test-type labels (session_label, e.g. "cpu_stress"/"io_stress") — session_label is
-# only a tagging column used to build the training CSV and is never a model input or target.
-# The old CPU_BOUND/MEMORY_BOUND/IO_BOUND/LOCK_CONTENTION scheme predicted THAT kind of thing
-# and is no longer correct for the v5 champion.
-#
-# Class 3 ("High") is the top ~3% of observed stall time — that is the "proper bottleneck"
-# class. Class 0 ("Normal") is the bottom 50%.
+# The deployed v7.2 model is binary and Predictor selects its labels from model.classes_.
 CLASS_NAMES = {0: "Normal", 1: "Low", 2: "Medium", 3: "High"}
 BOTTLENECK_CLASS = 3  # predictions == BOTTLENECK_CLASS are the actual bottleneck cases
 
 
 def engineer_features_v5(df: pd.DataFrame) -> pd.DataFrame:
-    """Reproduces bottleneck_diagnosis_v5.ipynb cells 6-7 exactly (causal signals only,
-    leakage-free). Must be kept in lockstep with the notebook — this is what the champion
-    model was trained on, not the old ml.features.engineering.engineer_features pipeline.
+    """Reproduces the v7.2 training notebooks' causal feature engineering.
+
+    Keep these transformations in lockstep with the classifier and attribution notebooks.
     """
     df = df.copy()
 
@@ -121,15 +113,17 @@ class RealtimeReader:
         if not self.config.model_path or not os.path.exists(self.config.model_path):
             raise RuntimeError(f"Missing champion model for realtime inference: {self.config.model_path}")
 
-        # Load champion model (v5: RandomForestClassifier by default)
+        # Load the SHAP-reduced v7.2 classifier.
         self.model = joblib.load(self.config.model_path)
         print(f"Loaded model: {self.config.model_path} ({type(self.model).__name__})")
 
-        # Feature list the model was trained on. Prefer feature_cols_v5.json (ground truth from
-        # the notebook's Section 8 save), fall back to the model's own feature_names_in_ if the
-        # json isn't available, and cross-check the two when both are present.
+        # The notebook-saved ordered list is the deployment contract for the SHAP-reduced model.
         json_features = None
-        if self.config.feature_cols_path and os.path.exists(self.config.feature_cols_path):
+        if self.config.feature_cols_path:
+            if not os.path.isfile(self.config.feature_cols_path):
+                raise RuntimeError(
+                    f"Missing classifier feature columns file: {self.config.feature_cols_path}"
+                )
             json_features = load_feature_columns(self.config.feature_cols_path)
 
         model_features = list(self.model.feature_names_in_) if hasattr(self.model, "feature_names_in_") else None
@@ -141,23 +135,18 @@ class RealtimeReader:
         else:
             raise RuntimeError(
                 "Could not determine model feature list: model has no feature_names_in_ and "
-                f"feature_cols_v5.json was not found at {self.config.feature_cols_path!r}"
+                f"no configured feature list was found at {self.config.feature_cols_path!r}"
             )
 
-        if json_features is not None and set(json_features) != set(self.model_features):
-            missing_in_model = set(json_features) - set(self.model_features)
-            missing_in_json = set(self.model_features) - set(json_features)
-            self._log_debug(
-                "WARNING: feature_cols_v5.json and model.feature_names_in_ disagree — "
-                f"in json but not model: {missing_in_model}; in model but not json: {missing_in_json}"
+        if json_features is not None and json_features != self.model_features:
+            raise RuntimeError(
+                "Configured feature columns do not exactly match the model's training order: "
+                f"configured={json_features}; model={self.model_features}"
             )
 
         print(f"Model expects {len(self.model_features)} features")
 
-        # Optional scaler (feature_scaler_v5.pkl). Per the notebook (Section 4), StandardScaler
-        # was fit on X_train only for the MLP comparison model — tree models (RandomForest,
-        # the v5 champion) are scale-invariant and were trained/evaluated on unscaled features.
-        # Only apply the scaler if the loaded champion actually needs it.
+        # Only apply a scaler if the loaded classifier actually needs scaled inputs.
         self.scaler = None
         self.uses_scaled_input = not hasattr(self.model, "feature_importances_")
         if self.uses_scaled_input:
@@ -165,19 +154,35 @@ class RealtimeReader:
                 raise RuntimeError(
                     f"Model {type(self.model).__name__} appears to require scaled input (no "
                     "feature_importances_ attribute, i.e. not a tree model) but "
-                    f"feature_scaler_v5.pkl was not found at {self.config.scaler_path!r}"
+                    f"Configured classifier scaler was not found at {self.config.scaler_path!r}"
                 )
             self.scaler = joblib.load(self.config.scaler_path)
-            self._log_debug("Loaded feature_scaler_v5.pkl — will scale features before predict")
+            self._log_debug("Loaded classifier scaler — will scale features before predict")
         else:
             self._log_debug("Champion is a tree model — skipping scaling (matches notebook Section 4)")
 
-        # Optional, informational only — the label boundaries the champion's classes were derived
-        # from. Not used in inference; the model already encodes these boundaries.
+        # This file provides the deployment probability threshold and the training label cutoff.
         self.label_thresholds: dict[str, float] | None = None
-        if self.config.label_thresholds_path and os.path.exists(self.config.label_thresholds_path):
+        self.decision_probability_threshold: float | None = None
+        if self.config.label_thresholds_path:
+            if not os.path.isfile(self.config.label_thresholds_path):
+                raise RuntimeError(
+                    f"Missing classifier threshold metadata: {self.config.label_thresholds_path}"
+                )
             self.label_thresholds = load_label_thresholds(self.config.label_thresholds_path)
-            self._log_debug(f"Label thresholds (informational): {self.label_thresholds}")
+            threshold = self.label_thresholds.get("decision_probability_threshold")
+            if threshold is None:
+                raise ValueError(
+                    "Classifier threshold metadata must define decision_probability_threshold: "
+                    f"{self.config.label_thresholds_path}"
+                )
+            if not 0.0 <= threshold <= 1.0:
+                raise ValueError(
+                    "decision_probability_threshold in "
+                    f"{self.config.label_thresholds_path} must be between 0 and 1"
+                )
+            self.decision_probability_threshold = threshold
+            self._log_debug(f"Loaded classifier threshold metadata: {self.label_thresholds}")
 
     def _log_debug(self, message: str) -> None:
         if self.debug_enabled:
@@ -469,7 +474,7 @@ class RealtimeReader:
         if self.collect_timings:
             self.last_stage_timings_ns["aggregation_ns"] = time.perf_counter_ns() - stage_start_ns
 
-        # v5: inline leakage-free feature engineering (notebook cells 6-7), not ml.features.engineering
+        # Keep realtime transformations aligned with both training notebooks.
         if self.collect_timings:
             stage_start_ns = time.perf_counter_ns()
         featured_df = engineer_features_v5(rows_df)
@@ -502,13 +507,12 @@ class RealtimeReader:
             self.last_stage_timings_ns["feature_ns"] = time.perf_counter_ns() - stage_start_ns
 
         return {
-            "rows": rows_df,
+            "rows": featured_df,
             "features": feature_frame,
         }
 
     def predict(self) -> dict[str, Any]:
-        """read_once() + inference in one step, applying feature_scaler_v5.pkl only if the
-        loaded champion actually needs scaled input (see uses_scaled_input in __init__)."""
+        """Read one snapshot and infer, scaling inputs only for a non-tree classifier."""
         result = self.read_once()
         feature_frame = result["features"]
 
@@ -518,8 +522,20 @@ class RealtimeReader:
         if self.uses_scaled_input and self.scaler is not None:
             model_input = self.scaler.transform(feature_frame)
 
-        predictions = self.model.predict(model_input)
         probabilities = self.model.predict_proba(model_input) if hasattr(self.model, "predict_proba") else None
+        if self.decision_probability_threshold is not None and probabilities is not None:
+            classes = list(self.model.classes_) if hasattr(self.model, "classes_") else []
+            if set(classes) != {0, 1}:
+                raise RuntimeError(
+                    "A configured binary decision threshold requires model classes {0, 1}; "
+                    f"found {classes}"
+                )
+            positive_class_index = classes.index(1)
+            predictions = (
+                probabilities[:, positive_class_index] >= self.decision_probability_threshold
+            ).astype(int)
+        else:
+            predictions = self.model.predict(model_input)
         if self.collect_timings:
             self.last_stage_timings_ns["rf_inference_ns"] = time.perf_counter_ns() - stage_start_ns
 
@@ -531,10 +547,16 @@ class RealtimeReader:
 def main() -> None:
     reader = RealtimeReader()
     result = reader.predict()
+    class_names = CLASS_NAMES
+    bottleneck_class = BOTTLENECK_CLASS
+    model_classes = set(int(value) for value in getattr(reader.model, "classes_", []))
+    if model_classes == {0, 1}:
+        class_names = {0: "Not-High", 1: "High"}
+        bottleneck_class = 1
     for position, (_, row) in enumerate(result["rows"].iterrows()):
         pred_class = int(result["predictions"][position])
-        label = CLASS_NAMES.get(pred_class, str(pred_class))
-        flag = "  <-- BOTTLENECK" if pred_class == BOTTLENECK_CLASS else ""
+        label = class_names.get(pred_class, str(pred_class))
+        flag = "  <-- BOTTLENECK" if pred_class == bottleneck_class else ""
         print(f"pid={row['pid']} cpu={row['cpu']} comm={row['comm']!r} -> {pred_class} ({label}){flag}")
 
 
