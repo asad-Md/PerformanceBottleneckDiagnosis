@@ -22,12 +22,12 @@ Failed, incomplete, and interrupted runs remain in `run_summary.csv`; interpret 
 ### cpu / medium / ebpf_plus_diagnosis / configured interval 5000.0 ms
 
 - Runs: 1; completed: 1; incomplete/failed: 0.
-- Diagnosis cycles: 55.
-- Pooled cycle latency median/p95: 388.161561 / 667.6391091999999 ms.
-- Median of per-run cycle medians: 388.161561 ms; between-run standard deviation of run medians: not measured ms.
-- Median of per-run p95 cycle latency: 667.6391091999999 ms.
-- Actual start-to-start interval median/p95: 5357.169118 / 5667.738280699999 ms.
-- Median records processed per cycle: 3496.0.
+- Diagnosis cycles: 56.
+- Pooled cycle latency median/p95: 391.865494 / 553.25643775 ms.
+- Median of per-run cycle medians: 391.865494 ms; between-run standard deviation of run medians: not measured ms.
+- Median of per-run p95 cycle latency: 553.25643775 ms.
+- Actual start-to-start interval median/p95: 5386.9611165 / 5553.412761250001 ms.
+- Median records processed per cycle: 3795.5.
 - Missed-deadline rate: not measured (not measured means no deadline was defined).
 
 ### cpu / medium / workload_only / configured interval nan ms
@@ -46,8 +46,8 @@ Failed, incomplete, and interrupted runs remain in `run_summary.csv`; interpret 
 ### cpu / medium
 
 - Matched repetitions: 1.
-- Mean host CPU change: 0.03136704119850009 percentage points (between-repetition SD: not measured).
-- Mean host memory change: 772595712.0 bytes (between-repetition SD: not measured).
-- Mean monitoring-process CPU: 0.0% of one logical CPU.
-- Mean monitoring-process RSS: 1152294912.0 bytes.
+- Mean host CPU change: 0.015673724521423793 percentage points (between-repetition SD: not measured).
+- Mean host memory change: 1063448576.0 bytes (between-repetition SD: not measured).
+- Mean monitoring-process CPU: not measured% of one logical CPU.
+- Mean monitoring-process RSS: not measured bytes.
 

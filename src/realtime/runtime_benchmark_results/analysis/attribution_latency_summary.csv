@@ -1,2 +1,2 @@
 condition,completed_measurement_cycles,cycles_with_attribution_inference,mean_attribution_latency_ms,median_attribution_latency_ms,p95_attribution_latency_ms,max_attribution_latency_ms
-ebpf_plus_diagnosis,55,0,,,,
+ebpf_plus_diagnosis,56,56,2.3044392321428577,2.2889095,2.413716,2.587654

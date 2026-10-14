@@ -1,2 +1,2 @@
 n_intervals,mean_actual_interval_ms,median_actual_interval_ms,p95_actual_interval_ms,min_actual_interval_ms,max_actual_interval_ms
-60,5410.310554683334,5349.7854425000005,5665.693248449999,5202.270685,5690.207921
+61,5380.89817409836,5376.309184,5548.546097,5210.211622,5655.264963

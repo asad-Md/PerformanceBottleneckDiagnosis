@@ -1,2 +1,2 @@
 condition,completed_measurement_cycles,cycles_with_attribution_data,cycles_with_attributed_rows,attribution_data_coverage_pct,cycles_with_attributed_rows_pct,mean_attributed_rows_per_cycle,median_attributed_rows_per_cycle,total_attributed_rows
-ebpf_plus_diagnosis,55,55,0,100.0,0.0,0.0,0.0,0
+ebpf_plus_diagnosis,56,56,56,100.0,100.0,6.303571428571429,6.0,353

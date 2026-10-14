@@ -163,7 +163,7 @@ class Predictor:
                         "confidence": confidence,
                     }
                     payload.append(item)
-                    if item["is_bottleneck"] and confidence is not None and confidence > 80.0:
+                    if item["is_bottleneck"] and confidence is not None and confidence > 50.0:
                         qualifying_positions.append(position)
 
                 attributor = getattr(self, "attributor", None)
