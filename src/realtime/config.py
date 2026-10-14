@@ -18,6 +18,10 @@ class RealtimeConfig:
     scaler_path: str = ""
     feature_cols_path: str = ""
     label_thresholds_path: str = ""
+    attribution_model_path: str = ""
+    attribution_scaler_path: str = ""
+    attribution_feature_cols_path: str = ""
+    attribution_target_cols_path: str = ""
 
 
 def load_config() -> RealtimeConfig:
@@ -67,5 +71,23 @@ def load_config() -> RealtimeConfig:
         if candidate and os.path.exists(candidate):
             cfg.label_thresholds_path = candidate
             break
+
+    attribution_dir = root / "attributionAnalysis" / "pipeline_comparison_artifacts"
+    cfg.attribution_model_path = os.getenv(
+        "REALTIME_ATTRIBUTION_MODEL_PATH",
+        str(attribution_dir / "baseline_original_best.pt"),
+    )
+    cfg.attribution_scaler_path = os.getenv(
+        "REALTIME_ATTRIBUTION_SCALER_PATH",
+        str(attribution_dir / "feature_scaler.pkl"),
+    )
+    cfg.attribution_feature_cols_path = os.getenv(
+        "REALTIME_ATTRIBUTION_FEATURE_COLS_PATH",
+        str(attribution_dir / "attribution_feature_cols.json"),
+    )
+    cfg.attribution_target_cols_path = os.getenv(
+        "REALTIME_ATTRIBUTION_TARGET_COLS_PATH",
+        str(attribution_dir / "attribution_target_cols.json"),
+    )
 
     return cfg

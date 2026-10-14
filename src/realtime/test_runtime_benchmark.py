@@ -11,8 +11,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import joblib
+import numpy as np
 import pandas as pd
+import torch
+from sklearn.preprocessing import StandardScaler
 
+from src.realtime.attribution_model import BottleneckAttributor, BottleneckMLP
 from src.realtime.plot_runtime_benchmark import generate_plots
 from src.realtime.predictor import Predictor
 from src.realtime.runtime_benchmark import (
@@ -55,6 +60,7 @@ def _base_cycle(run_id: str, cycle_id: int, total_ms: float, interval_ms: float 
         "total_cycle_ms": total_ms,
         "records_processed": 3,
         "high_predictions": 1,
+        "attribution_results_json": "[]",
         "configured_interval_ms": 1000,
         "actual_cycle_interval_ms": interval_ms,
         "deadline_missed": "",
@@ -106,6 +112,24 @@ class _FakeReader:
         }
 
 
+class _FakeAttributor:
+    target_columns = ["CPU", "Memory", "Cache", "IO", "Lock", "ContextSwitch"]
+
+    def __init__(self) -> None:
+        self.input_pids: list[int] = []
+
+    def predict(self, rows: pd.DataFrame) -> np.ndarray:
+        self.input_pids = rows["pid"].tolist()
+        return np.array([
+            [0.70, 0.20, 0.60, 0.10, 0.49, 0.80],
+            [0.20, 0.60, 0.10, 0.90, 0.20, 0.10],
+        ])
+
+    @staticmethod
+    def predict_labels(probabilities: np.ndarray) -> np.ndarray:
+        return probabilities >= 0.50
+
+
 class RuntimeBenchmarkTests(unittest.TestCase):
     def test_async_writer_flushes_rows_and_keeps_unmeasured_stage_empty(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -118,6 +142,97 @@ class RuntimeBenchmarkTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["run_id"], "fixture")
             self.assertEqual(rows[0]["mlp_inference_ms"], "")
+            self.assertEqual(rows[0]["attribution_results_json"], "")
+
+    def test_async_writer_upgrades_old_cycle_schema_without_losing_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "cycle_metrics.csv"
+            old_fields = [field for field in CYCLE_FIELDS if field != "attribution_results_json"]
+            old_row = {field: value for field, value in _base_cycle("old-run", 1, 2.0, None).items() if field in old_fields}
+            _write_csv(path, old_fields, [old_row])
+
+            writer = AsyncCsvWriter(path, CYCLE_FIELDS)
+            writer.submit({
+                "run_id": "new-run",
+                "attribution_results_json": '[{"pid":123}]',
+                "cycle_status": "completed",
+            })
+            writer.close()
+
+            with path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0]["run_id"], "old-run")
+            self.assertEqual(rows[0]["attribution_results_json"], "")
+            self.assertEqual(rows[1]["run_id"], "new-run")
+            self.assertEqual(rows[1]["attribution_results_json"], '[{"pid":123}]')
+
+    def test_attribution_model_loads_notebook_artifacts_and_preserves_feature_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            feature_columns = ["feature_a", "feature_b"]
+            target_columns = ["CPU"]
+            scaler = StandardScaler().fit(pd.DataFrame([[0.0, 1.0], [2.0, 5.0]], columns=feature_columns))
+            checkpoint_path = root / "baseline_original_best.pt"
+            torch.save(BottleneckMLP(2, 1).state_dict(), checkpoint_path)
+            scaler_path = root / "feature_scaler.pkl"
+            feature_path = root / "attribution_feature_cols.json"
+            target_path = root / "attribution_target_cols.json"
+            joblib.dump(scaler, scaler_path)
+            feature_path.write_text(json.dumps(feature_columns), encoding="utf-8")
+            target_path.write_text(json.dumps(target_columns), encoding="utf-8")
+
+            attributor = BottleneckAttributor(SimpleNamespace(
+                attribution_model_path=str(checkpoint_path),
+                attribution_scaler_path=str(scaler_path),
+                attribution_feature_cols_path=str(feature_path),
+                attribution_target_cols_path=str(target_path),
+            ))
+            probabilities = attributor.predict(pd.DataFrame({"feature_b": [3.0], "feature_a": [1.0]}))
+
+            self.assertEqual(probabilities.shape, (1, 1))
+            self.assertGreaterEqual(float(probabilities[0, 0]), 0.0)
+            self.assertLessEqual(float(probabilities[0, 0]), 1.0)
+            np.testing.assert_array_equal(
+                attributor.predict_labels(np.array([[0.50]])),
+                np.array([[True]]),
+            )
+
+    def test_attribution_runs_only_for_high_predictions_above_80_percent(self) -> None:
+        predictor = Predictor.__new__(Predictor)
+        predictor.reader = _FakeReader()
+        predictor.reader.predict = lambda: {
+            "rows": pd.DataFrame([
+                {"pid": 101, "cpu": 0, "comm": "qualifies"},
+                {"pid": 102, "cpu": 1, "comm": "exactly-80"},
+                {"pid": 103, "cpu": 2, "comm": "not-high"},
+                {"pid": 104, "cpu": 3, "comm": "also-qualifies"},
+            ]),
+            "predictions": [3, 3, 1, 3],
+            "probabilities": [
+                [0.01, 0.02, 0.06, 0.91],
+                [0.05, 0.05, 0.10, 0.80],
+                [0.02, 0.94, 0.02, 0.02],
+                [0.05, 0.05, 0.09, 0.81],
+            ],
+        }
+        predictor.attributor = _FakeAttributor()
+        predictor.config = SimpleNamespace(polling_interval_s=1.0)
+        predictor.cleanup_maps_on_exit = False
+        predictor.class_names = {0: "Normal", 1: "Low", 2: "Medium", 3: "High"}
+        predictor.bottleneck_class = 3
+        cycles: list[dict[str, object]] = []
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            predictor.run_benchmark(cycles.append, duration_s=0.002, warmup_s=0)
+
+        self.assertEqual(predictor.attributor.input_pids, [101, 104])
+        attribution_rows = json.loads(cycles[0]["attribution_results_json"])
+        self.assertEqual([row["pid"] for row in attribution_rows], [101, 104])
+        self.assertEqual(attribution_rows[0]["labels"], ["CPU", "Cache", "ContextSwitch"])
+        self.assertEqual(attribution_rows[1]["labels"], ["Memory", "IO"])
+        self.assertIsNotNone(cycles[0]["mlp_inference_ms"])
+        self.assertEqual(cycles[0]["high_predictions"], 3)
 
     def test_existing_loop_reports_measured_cycle_fields_without_deadline(self) -> None:
         predictor = Predictor.__new__(Predictor)

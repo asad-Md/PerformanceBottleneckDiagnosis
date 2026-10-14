@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -9,12 +10,12 @@ from typing import Callable
 
 try:
     from .config import RealtimeConfig, load_config
-    from .realtime_reader import RealtimeReader
+    from .realtime_reader import BOTTLENECK_CLASS, CLASS_NAMES, RealtimeReader
     from .utils import unpin_maps
 except ImportError:  # pragma: no cover - direct-script fallback
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from realtime.config import RealtimeConfig, load_config
-    from realtime.realtime_reader import RealtimeReader
+    from realtime.realtime_reader import BOTTLENECK_CLASS, CLASS_NAMES, RealtimeReader
     from realtime.utils import unpin_maps
 
 
@@ -38,26 +39,35 @@ class Predictor:
         self.reader = RealtimeReader(self.config, collect_timings=benchmark_mode)
         self.cleanup_maps_on_exit = cleanup_maps_on_exit
         self.debug_enabled = os.getenv("REALTIME_DEBUG", "").lower() in {"1", "true", "yes", "on"}
+        self.attributor = None
+        if benchmark_mode:
+            try:
+                from .attribution_model import BottleneckAttributor
+            except ImportError:  # pragma: no cover - direct-script fallback
+                from realtime.attribution_model import BottleneckAttributor
+
+            self.attributor = BottleneckAttributor(self.config)
 
         if not self.config.model_path or not os.path.exists(self.config.model_path):
             raise RuntimeError(f"Missing model for realtime inference: {self.config.model_path}")
 
         self.model = self.reader.model
-        self.class_names = BINARY_CLASS_NAMES.copy()
-        self.bottleneck_class = BINARY_BOTTLENECK_CLASS
+        self.class_names = CLASS_NAMES.copy()
+        self.bottleneck_class = BOTTLENECK_CLASS
 
         if hasattr(self.model, "classes_"):
             try:
                 model_classes = tuple(int(c) for c in self.model.classes_)
                 if set(model_classes) == {0, 1}:
                     self.class_names = {cls: BINARY_CLASS_NAMES[cls] for cls in sorted(model_classes)}
-                else:
+                    self.bottleneck_class = BINARY_BOTTLENECK_CLASS
+                elif not set(model_classes).issubset(self.class_names):
                     self._log_warning(
-                        "Loaded model classes are not binary {0, 1}. Predictions will still be shown, "
-                        "but class labels may be incorrect."
+                        "Loaded model classes do not match the realtime diagnosis labels. "
+                        "Predictions will still be shown, but labels may be incorrect."
                     )
             except Exception:
-                self._log_warning("Failed to normalize model classes from model.classes_. Using default binary labels.")
+                self._log_warning("Failed to normalize model classes from model.classes_. Using default labels.")
 
         self._map_paths = [
             self.config.sched_map_path,
@@ -127,8 +137,70 @@ class Predictor:
                 if cycle_start_ns is not None and previous_cycle_start_ns is not None
                 else None
             )
+            mlp_inference_ms: float | None = None
+            attribution_results: list[dict[str, object]] = []
             try:
                 result = self.reader.predict()
+                predictions = result["predictions"]
+                probabilities = result["probabilities"]
+                rows_df = result["rows"]
+
+                payload: list[dict[str, object]] = []
+                qualifying_positions: list[int] = []
+                for position, (_, row) in enumerate(rows_df.iterrows()):
+                    pred_class = int(predictions[position])
+                    confidence = None
+                    if probabilities is not None:
+                        confidence = float(max(probabilities[position]) * 100)
+
+                    item = {
+                        "pid": int(row["pid"]),
+                        "cpu": int(row["cpu"]),
+                        "comm": str(row.get("comm", "") or "-"),
+                        "pred_class": pred_class,
+                        "prediction": self.class_names.get(pred_class, str(pred_class)),
+                        "is_bottleneck": pred_class == self.bottleneck_class,
+                        "confidence": confidence,
+                    }
+                    payload.append(item)
+                    if item["is_bottleneck"] and confidence is not None and confidence > 80.0:
+                        qualifying_positions.append(position)
+
+                attributor = getattr(self, "attributor", None)
+                if attributor is not None and qualifying_positions:
+                    attribution_start_ns = time.perf_counter_ns()
+                    qualifying_rows = rows_df.iloc[qualifying_positions]
+                    attribution_probabilities = attributor.predict(qualifying_rows)
+                    mlp_inference_ms = (time.perf_counter_ns() - attribution_start_ns) / 1_000_000
+                    if attribution_probabilities.shape != (
+                        len(qualifying_positions),
+                        len(attributor.target_columns),
+                    ):
+                        raise RuntimeError(
+                            "Attribution MLP returned an unexpected output shape: "
+                            f"{attribution_probabilities.shape}"
+                        )
+                    attribution_labels = attributor.predict_labels(attribution_probabilities)
+                    for position, row_probs, row_labels in zip(
+                        qualifying_positions, attribution_probabilities, attribution_labels
+                    ):
+                        item = payload[position]
+                        attribution_results.append({
+                            "pid": item["pid"],
+                            "cpu": item["cpu"],
+                            "comm": item["comm"],
+                            "labels": [
+                                target
+                                for target, predicted in zip(attributor.target_columns, row_labels)
+                                if predicted
+                            ],
+                            "probabilities": {
+                                target: float(probability)
+                                for target, probability in zip(
+                                    attributor.target_columns, row_probs
+                                )
+                            },
+                        })
             except Exception as exc:
                 if cycle_callback is not None and cycle_start_ns is not None:
                     cycle_end_ns = time.perf_counter_ns()
@@ -144,7 +216,8 @@ class Predictor:
                         "rf_inference_ms": self._timing_ms(timings.get("rf_inference_ns")),
                         "classifier_inference_ms": self._timing_ms(timings.get("rf_inference_ns")),
                         "model_class": type(self.reader.model).__name__,
-                        "mlp_inference_ms": None,
+                        "mlp_inference_ms": mlp_inference_ms,
+                        "attribution_results_json": None,
                         "output_ms": None,
                         "detection_latency_ms": None,
                         "total_cycle_ms": (cycle_end_ns - cycle_start_ns) / 1_000_000,
@@ -159,26 +232,6 @@ class Predictor:
 
             prediction_end_ns = time.perf_counter_ns() if cycle_callback is not None else None
             output_start_ns = time.perf_counter_ns() if cycle_callback is not None else None
-            predictions = result["predictions"]
-            probabilities = result["probabilities"]
-            rows_df = result["rows"]
-
-            payload: list[dict[str, object]] = []
-            for position, (_, row) in enumerate(rows_df.iterrows()):
-                pred_class = int(predictions[position])
-                confidence = None
-                if probabilities is not None:
-                    confidence = float(max(probabilities[position]) * 100)
-
-                payload.append({
-                    "pid": int(row["pid"]),
-                    "cpu": int(row["cpu"]),
-                    "comm": str(row.get("comm", "") or "-"),
-                    "pred_class": pred_class,
-                    "prediction": self.class_names.get(pred_class, str(pred_class)),
-                    "is_bottleneck": pred_class == self.bottleneck_class,
-                    "confidence": confidence,
-                })
 
             rows_to_show = self._select_display_rows(payload)
             bottleneck_count = sum(1 for item in payload if item["is_bottleneck"])
@@ -220,7 +273,10 @@ class Predictor:
                     "rf_inference_ms": self._timing_ms(timings.get("rf_inference_ns")),
                     "classifier_inference_ms": self._timing_ms(timings.get("rf_inference_ns")),
                     "model_class": type(self.reader.model).__name__,
-                    "mlp_inference_ms": None,
+                    "mlp_inference_ms": mlp_inference_ms,
+                    "attribution_results_json": json.dumps(
+                        attribution_results, separators=(",", ":"), allow_nan=False
+                    ),
                     "output_ms": (output_end_ns - output_start_ns) / 1_000_000 if output_start_ns is not None else None,
                     "detection_latency_ms": (
                         (prediction_end_ns - cycle_start_ns) / 1_000_000

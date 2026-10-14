@@ -10,6 +10,7 @@ import platform
 import queue
 import re
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -51,6 +52,7 @@ CYCLE_FIELDS = [
     "total_cycle_ms",
     "records_processed",
     "high_predictions",
+    "attribution_results_json",
     "configured_interval_ms",
     "actual_cycle_interval_ms",
     "deadline_missed",
@@ -191,7 +193,7 @@ def capture_environment(config: RealtimeConfig, workload_command: str | None) ->
         "effective_uid": os.geteuid() if hasattr(os, "geteuid") else None,
         "libraries": {
             name: _package_version(name)
-            for name in ("numpy", "pandas", "scikit-learn", "joblib", "matplotlib")
+            for name in ("numpy", "pandas", "scikit-learn", "joblib", "matplotlib", "torch")
         },
         "bpf_map_paths": {
             "sched": config.sched_map_path,
@@ -203,6 +205,16 @@ def capture_environment(config: RealtimeConfig, workload_command: str | None) ->
         "model_sha256": _file_sha256(config.model_path),
         "feature_columns_filename": Path(config.feature_cols_path).name if config.feature_cols_path else None,
         "feature_columns_sha256": _file_sha256(config.feature_cols_path),
+        "attribution_model_filename": (
+            Path(config.attribution_model_path).name if config.attribution_model_path else None
+        ),
+        "attribution_model_sha256": _file_sha256(config.attribution_model_path),
+        "attribution_scaler_filename": (
+            Path(config.attribution_scaler_path).name if config.attribution_scaler_path else None
+        ),
+        "attribution_scaler_sha256": _file_sha256(config.attribution_scaler_path),
+        "attribution_feature_columns_sha256": _file_sha256(config.attribution_feature_cols_path),
+        "attribution_target_columns_sha256": _file_sha256(config.attribution_target_cols_path),
         "workload_command": workload_command,
     }
 
@@ -226,8 +238,45 @@ class AsyncCsvWriter:
     def __init__(self, path: Path, fields: list[str], queue_size: int = 256) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         is_new = not path.exists() or path.stat().st_size == 0
+        writer_fields = fields
+        if not is_new:
+            with path.open("r", newline="", encoding="utf-8") as existing_handle:
+                existing_fields = next(csv.reader(existing_handle), [])
+            if not existing_fields or len(existing_fields) != len(set(existing_fields)):
+                raise ValueError(f"Existing benchmark CSV has an invalid header: {path}")
+            writer_fields = existing_fields + [field for field in fields if field not in existing_fields]
+            if writer_fields != existing_fields:
+                temporary_path: Path | None = None
+                try:
+                    with path.open("r", newline="", encoding="utf-8") as source:
+                        reader = csv.DictReader(source)
+                        with tempfile.NamedTemporaryFile(
+                            mode="w",
+                            newline="",
+                            encoding="utf-8",
+                            dir=path.parent,
+                            prefix=f"{path.name}.",
+                            suffix=".tmp",
+                            delete=False,
+                        ) as temporary:
+                            temporary_path = Path(temporary.name)
+                            writer = csv.DictWriter(
+                                temporary,
+                                fieldnames=writer_fields,
+                                extrasaction="ignore",
+                            )
+                            writer.writeheader()
+                            writer.writerows(reader)
+                            temporary.flush()
+                            os.fsync(temporary.fileno())
+                    if temporary_path is None:
+                        raise RuntimeError("Temporary benchmark CSV was not created")
+                    os.replace(temporary_path, path)
+                finally:
+                    if temporary_path is not None and temporary_path.exists():
+                        temporary_path.unlink()
         self._handle = path.open("a", newline="", encoding="utf-8")
-        self._writer = csv.DictWriter(self._handle, fieldnames=fields, extrasaction="ignore")
+        self._writer = csv.DictWriter(self._handle, fieldnames=writer_fields, extrasaction="ignore")
         if is_new:
             self._writer.writeheader()
             self._handle.flush()
@@ -343,6 +392,7 @@ def run_diagnosis(args: argparse.Namespace) -> int:
         cycle_writer = AsyncCsvWriter(output_dir / "cycle_metrics.csv", CYCLE_FIELDS)
         predictor = Predictor(config, benchmark_mode=True, cleanup_maps_on_exit=False)
         run_config["active_model_class"] = type(predictor.model).__name__
+        run_config["active_attribution_model_class"] = type(predictor.attributor.model).__name__
         _write_json_atomic(run_path, run_config)
 
         def record_cycle(measurement: dict[str, object]) -> None:

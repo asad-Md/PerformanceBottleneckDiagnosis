@@ -8,8 +8,8 @@ Results are written to `src/realtime/runtime_benchmark_results/` by default. Run
 
 - `cycle_start_ns` and `cycle_end_ns` use Python's monotonic `perf_counter_ns()` clock.
 - The existing loop waits for the configured polling interval **after** each cycle. Thus start-to-start cadence includes work plus the fixed post-cycle wait; this runner does not add another scheduler.
-- `detection_latency_ms` covers map reads through prediction completion. `rf_inference_ms` measures the active classifier's scaling, `predict()`, and optional `predict_proba()` calls together. `total_cycle_ms` additionally includes diagnostic rendering and console output. CSV queue writes happen after `cycle_end_ns`, outside that cycle duration.
-- The active real-time path has no separate MLP attribution call. `mlp_inference_ms` is empty, not zero.
+- `detection_latency_ms` covers map reads through diagnosis and any eligible attribution inference. `rf_inference_ms` measures the active classifier's scaling, `predict()`, and optional `predict_proba()` calls together. `mlp_inference_ms` measures attribution feature selection, scaling, and MLP inference; it is empty when no row qualifies. `total_cycle_ms` additionally includes diagnostic rendering and console output. CSV queue writes happen after `cycle_end_ns`, outside that cycle duration.
+- Attribution runs only in benchmark mode, for rows predicted as bottlenecks with classifier confidence strictly above 80%. Its results are recorded in `attribution_results_json` in `cycle_metrics.csv`; each JSON array entry includes `pid`, `cpu`, `comm`, labels predicted at the notebook's 0.50 sigmoid threshold, and probabilities for all six attribution targets. No attribution is added to the live console output.
 - `aggregation_ms` measures reconstruction and merging of rows by `(pid, cpu)`; `feature_ms` measures the existing feature engineering and model-column selection. No transformations, feature order, missing-value behavior, or thresholds are changed.
 - `deadline_missed` is empty because the existing loop defines no cycle deadline. Its scheduling policy is fixed delay, not a fixed-deadline schedule.
 - `actual_cycle_interval_ms` is the interval between consecutive cycle starts, including a prior warm-up cycle where applicable. The first cycle has no preceding interval.
@@ -27,6 +27,8 @@ command -v bpftool
 command -v stress-ng
 test -r /proc/stat && test -r /proc/meminfo
 ```
+
+The benchmark also requires PyTorch, the `baseline_original_best.pt` checkpoint, the notebook-generated attribution feature/target column JSON files, and the matching `feature_scaler.pkl` saved by `bottleneck_attrition_analysis_balanced.ipynb`. The checkpoint and column files default to `src/attributionAnalysis/pipeline_comparison_artifacts/`; the scaler is expected at the same location. Supply the scaler there or set `REALTIME_ATTRIBUTION_SCALER_PATH` to its location. The model, feature-column, and target-column paths can be overridden with `REALTIME_ATTRIBUTION_MODEL_PATH`, `REALTIME_ATTRIBUTION_FEATURE_COLS_PATH`, and `REALTIME_ATTRIBUTION_TARGET_COLS_PATH`. Missing or incompatible artifacts stop the benchmark with an explicit error rather than silently skipping attribution.
 
 The existing pinner and pinned maps need their normal setup and privileges. Follow the project's current pinner procedure; the benchmark runner itself does not call the pinner. It intentionally skips the predictor's normal shutdown unpin operation so a benchmark exit does not remove pins needed by another process. Do not manually clear maps for this experiment. Use the established pinner/session lifecycle for a fresh capture where needed.
 
@@ -124,6 +126,7 @@ python -m src.realtime.plot_runtime_benchmark \
 Artifacts:
 
 - `cycle_metrics.csv`: one successful or failed row for each attempted diagnosis cycle, including warm-up rows.
+  When an existing file predates attribution, its header is extended atomically and prior rows are preserved with empty attribution cells.
 - `system_resource_metrics.csv`: timestamped host and selected-process samples. The baseline process should pass `--workload-pid`; monitored runs should pass both process IDs.
 - `run_<run_id>.json`: run configuration, environment facts, artifact hashes, and completion status.
 - `run_summary.csv`: one row per recorded run, including incomplete/failed status and per-run cycle statistics.
