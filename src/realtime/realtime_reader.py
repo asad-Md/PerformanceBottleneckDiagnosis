@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from .config import RealtimeConfig, load_config
-from .utils import run_bpftool_dump, load_feature_columns, load_label_thresholds
+from .utils import run_bpftool_clear, run_bpftool_dump, load_feature_columns, load_label_thresholds
 
 # Matches bottleneck_diagnosis_v5.ipynb Section 1 (class_names_map / TARGET_NAMES).
 #
@@ -190,6 +190,15 @@ class RealtimeReader:
             "syscall": run_bpftool_dump(self.config.syscall_map_path),
             "lock": run_bpftool_dump(self.config.lock_map_path),
         }
+
+    def _clear_snapshot_maps(self, snapshot: dict[str, Any]) -> None:
+        map_entries = [
+            (self.config.sched_map_path, snapshot["sched"]),
+            (self.config.mem_map_path, snapshot["mem"]),
+            (self.config.syscall_map_path, snapshot["syscall"]),
+            (self.config.lock_map_path, snapshot["lock"]),
+        ]
+        run_bpftool_clear(map_entries)
 
     def _normalize_map_entry(self, entry: Any) -> tuple[dict[str, int], dict[str, Any]]:
         if not isinstance(entry, dict):
@@ -434,9 +443,12 @@ class RealtimeReader:
             }
             stage_start_ns = time.perf_counter_ns()
 
-        snapshot = self._read_snapshot()
-        if self.collect_timings:
-            self.last_stage_timings_ns["map_read_ns"] = time.perf_counter_ns() - stage_start_ns
+        try:
+            snapshot = self._read_snapshot()
+            self._clear_snapshot_maps(snapshot)
+        finally:
+            if self.collect_timings:
+                self.last_stage_timings_ns["map_read_ns"] = time.perf_counter_ns() - stage_start_ns
 
         map_entry_counts = {name: len(entries) for name, entries in snapshot.items()}
         self._log_debug("entries read from each map: " + json.dumps(map_entry_counts, sort_keys=True))

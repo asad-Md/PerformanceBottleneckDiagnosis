@@ -1,19 +1,22 @@
 # Realtime diagnosis runtime benchmark
 
-This benchmark measures the existing `Predictor` loop. It does not load eBPF programs, start workloads, clear maps, change model inputs, or run a second diagnosis scheduler. Run it manually on the Linux host where the existing pinned maps and model environment are available.
+This benchmark measures the existing `Predictor` loop. It does not load eBPF programs, start workloads, or change model inputs. It uses the predictor's map snapshot/reset behavior and polling schedule. Run it manually on the Linux host where the existing pinned maps and model environment are available.
 
 Results are written to `src/realtime/runtime_benchmark_results/` by default. Run the analysis notebook with `src/realtime/` as its working directory so its default `runtime_benchmark_results/` path resolves to that folder.
 
 ## What the measurements mean
 
 - `cycle_start_ns` and `cycle_end_ns` use Python's monotonic `perf_counter_ns()` clock.
-- The existing loop waits for the configured polling interval **after** each cycle. Thus start-to-start cadence includes work plus the fixed post-cycle wait; this runner does not add another scheduler.
-- `detection_latency_ms` covers map reads through diagnosis and any eligible attribution inference. `rf_inference_ms` measures the active classifier's scaling, `predict()`, and optional `predict_proba()` calls together. `mlp_inference_ms` measures attribution feature selection, scaling, and MLP inference; it is empty when no row qualifies. `total_cycle_ms` additionally includes diagnostic rendering and console output. CSV queue writes happen after `cycle_end_ns`, outside that cycle duration.
+- The configured polling interval targets the start-to-start cadence. A cycle that overruns starts its successor immediately; otherwise the predictor waits only for the remaining interval.
+- `map_read_ms` covers the four sequential pinned-map dumps and immediate deletion of the captured entries. Each dump starts a separate `bpftool` process and parses the full map as JSON, which can dominate this stage. Map deletion is not atomic with kernel-side updates; an update racing with deletion can be lost.
+- `aggregation_ms` measures reconstruction and merging of map rows by `(pid, cpu)`. `feature_ms` separately measures feature engineering and model-column selection.
+- `detection_latency_ms` covers map I/O through diagnosis and any eligible attribution inference. `rf_inference_ms` measures the active classifier's scaling, `predict()`, and optional `predict_proba()` calls together. `mlp_inference_ms` measures attribution feature selection, scaling, and MLP inference; it is empty when no row qualifies. `output_ms` measures diagnostic rendering and console output. `total_cycle_ms` includes those stages; CSV queue writes happen after `cycle_end_ns`, outside that cycle duration.
+- The configured polling interval (default 5 seconds) is a target interval between cycle starts. If the work in a cycle takes longer than the interval, the next cycle starts immediately. Attribution timing is only populated in benchmark mode and when a row qualifies.
 - Attribution runs only in benchmark mode, for rows predicted as bottlenecks with classifier confidence strictly above 80%. Its results are recorded in `attribution_results_json` in `cycle_metrics.csv`; each JSON array entry includes `pid`, `cpu`, `comm`, labels predicted at the notebook's 0.50 sigmoid threshold, and probabilities for all six attribution targets. No attribution is added to the live console output.
 - `aggregation_ms` measures reconstruction and merging of rows by `(pid, cpu)`; `feature_ms` measures the existing feature engineering and model-column selection. No transformations, feature order, missing-value behavior, or thresholds are changed.
-- `deadline_missed` is empty because the existing loop defines no cycle deadline. Its scheduling policy is fixed delay, not a fixed-deadline schedule.
+- `deadline_missed` is empty because the benchmark does not evaluate a separate cycle deadline. The polling interval is a cadence target, not a guarantee that every cycle will finish before its next start.
 - `actual_cycle_interval_ms` is the interval between consecutive cycle starts, including a prior warm-up cycle where applicable. The first cycle has no preceding interval.
-- Maps are read as repeated snapshots and are not cleared or differenced by this code. Until map update semantics are independently established, cycles must not be presented as non-overlapping measurement windows.
+- Each cycle snapshots the pinned maps and then deletes the captured entries. This is not atomic with kernel-side updates, so updates that race with deletion can be lost; the snapshots are intended as short windows, not guaranteed non-overlapping measurements.
 - Each run JSON records its status. A configuration left with `status: running` (for example, after abrupt termination) is classified as incomplete by the summarizer. Failed cycles are retained with null unavailable stages and an error string.
 - Cycle CSV records are written on a background thread and flushed per row. Queue overflow or writer failures raise an explicit error rather than silently dropping rows. Logging is not part of measured cycle duration, but it can affect scheduling and system-resource measurements.
 - Host CPU is aggregate `/proc/stat` utilization normalized to 0–100%. Per-process CPU is a percentage of one logical CPU and may exceed 100% for multi-threaded processes. RSS and host-used memory are in bytes. Resource sampling is performed by a separate process, and should be run in both conditions.
@@ -30,7 +33,7 @@ test -r /proc/stat && test -r /proc/meminfo
 
 The benchmark also requires PyTorch, the `baseline_original_best.pt` checkpoint, the notebook-generated attribution feature/target column JSON files, and the matching `feature_scaler.pkl` saved by `bottleneck_attrition_analysis_balanced.ipynb`. The checkpoint and column files default to `src/attributionAnalysis/pipeline_comparison_artifacts/`; the scaler is expected at the same location. Supply the scaler there or set `REALTIME_ATTRIBUTION_SCALER_PATH` to its location. The model, feature-column, and target-column paths can be overridden with `REALTIME_ATTRIBUTION_MODEL_PATH`, `REALTIME_ATTRIBUTION_FEATURE_COLS_PATH`, and `REALTIME_ATTRIBUTION_TARGET_COLS_PATH`. Missing or incompatible artifacts stop the benchmark with an explicit error rather than silently skipping attribution.
 
-The existing pinner and pinned maps need their normal setup and privileges. Follow the project's current pinner procedure; the benchmark runner itself does not call the pinner. It intentionally skips the predictor's normal shutdown unpin operation so a benchmark exit does not remove pins needed by another process. Do not manually clear maps for this experiment. Use the established pinner/session lifecycle for a fresh capture where needed.
+The existing pinner and pinned maps need their normal setup and privileges. Follow the project's current pinner procedure; the benchmark runner itself does not call the pinner. It intentionally skips the predictor's normal shutdown unpin operation so a benchmark exit does not remove pins needed by another process. The predictor deletes captured entries after each snapshot; do not manually clear maps while the benchmark is running. Use the established pinner/session lifecycle for a fresh capture where needed.
 
 `stress-ng` is optional. If it is unavailable, use an existing project workload and record its exact command. CPU, memory, and mixed examples below are commands for the user to launch manually; the benchmark never launches or terminates them.
 
@@ -111,7 +114,7 @@ Only the `workload_only` and `ebpf_plus_diagnosis` conditions are implemented. D
 
 ## Commands and outputs
 
-`run` supports 1-, 2-, and 5-second intervals while retaining the existing config value when `--interval-s` is omitted. Its duration is the measured window after warm-up; a cycle that starts before the end is allowed to finish. The configured interval is a fixed wait after each completed cycle, so observed start-to-start cadence is approximately the diagnosis cycle duration plus the configured wait. The one-second `--sample-interval-s` controls resource sampling independently of diagnosis scheduling.
+`run` supports 1-, 2-, and 5-second intervals while retaining the existing config value when `--interval-s` is omitted. Its duration is the measured window after warm-up; a cycle that starts before the end is allowed to finish. The configured interval is a start-to-start target; if diagnosis exceeds it, the next cycle starts immediately. The one-second `--sample-interval-s` controls resource sampling independently of diagnosis scheduling.
 
 After collecting real runs:
 
@@ -143,7 +146,7 @@ Artifacts:
 
 Report diagnosis-path latency, full cycle duration, observed start-to-start interval, and resource overhead as separate measurements. Neither inference time nor cycle cadence measures bottleneck detection delay. No trustworthy independent bottleneck-onset timestamp or process-ground-truth association is implemented here, so detection delay is not estimated.
 
-The inspected reader does not clear maps or compute interval deltas. Repeated model inputs may therefore reflect overlapping/cumulative map state. Map definitions and pinner behavior must be verified against their source before claiming that cycles represent fresh windows. A lower cycle latency alone is not evidence that monitoring has low overhead; use matched workload-only and monitored repetitions and report the process and host measurements.
+The reader deletes captured entries after each snapshot, but reset is not atomic with kernel-side writes. Updates racing with deletion can be lost, and keys introduced after a map's snapshot can remain until the next cycle. Treat these as intended short windows, not perfectly isolated measurements. A lower cycle latency alone is not evidence that monitoring has low overhead; use matched workload-only and monitored repetitions and report the process and host measurements.
 
 
 

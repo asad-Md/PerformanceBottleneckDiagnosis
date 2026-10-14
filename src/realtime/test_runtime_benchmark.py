@@ -270,6 +270,51 @@ class RuntimeBenchmarkTests(unittest.TestCase):
         self.assertIsNone(cycles[0]["actual_cycle_interval_ms"])
         self.assertGreater(cycles[1]["actual_cycle_interval_ms"], 0)
 
+    def _run_two_poll_cycles(self, processing_ns: int) -> list[float]:
+        predictor = Predictor.__new__(Predictor)
+        predictor.reader = _FakeReader()
+        predictor.config = SimpleNamespace(polling_interval_s=1.0)
+        predictor.cleanup_maps_on_exit = False
+        predictor.class_names = {0: "Not-High", 1: "High"}
+        predictor.bottleneck_class = 1
+        clock_ns = [0]
+        sleeps: list[float] = []
+        calls = 0
+
+        def predict():
+            nonlocal calls
+            calls += 1
+            clock_ns[0] += processing_ns
+            if calls == 1:
+                return {
+                    "rows": pd.DataFrame([{"pid": 123, "cpu": 0, "comm": "fixture"}]),
+                    "predictions": [1],
+                    "probabilities": [[0.1, 0.9]],
+                }
+            raise StopIteration
+
+        def sleep(duration_s: float) -> None:
+            sleeps.append(duration_s)
+            clock_ns[0] += int(duration_s * 1_000_000_000)
+
+        predictor.reader.predict = predict
+        with (
+            patch("src.realtime.predictor.time.perf_counter_ns", side_effect=lambda: clock_ns[0]),
+            patch("src.realtime.predictor.time.sleep", side_effect=sleep),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaises(StopIteration):
+                predictor._run_forever_inner()
+        return sleeps
+
+    def test_poll_wait_fills_only_time_left_in_start_to_start_interval(self) -> None:
+        sleeps = self._run_two_poll_cycles(processing_ns=300_000_000)
+        self.assertEqual(len(sleeps), 1)
+        self.assertAlmostEqual(sleeps[0], 0.7)
+
+    def test_poll_overrun_starts_next_cycle_without_additional_sleep(self) -> None:
+        self.assertEqual(self._run_two_poll_cycles(processing_ns=1_200_000_000), [])
+
     def test_benchmark_cleanup_does_not_unpin_maps(self) -> None:
         predictor = Predictor.__new__(Predictor)
         predictor.cleanup_maps_on_exit = False

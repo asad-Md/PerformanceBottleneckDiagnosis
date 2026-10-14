@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,77 @@ def run_bpftool_dump(map_path: str) -> list[dict[str, Any]]:
         if "error" in payload:
             raise RuntimeError(f"bpftool reported an error for pinned map '{map_path}': {payload['error']}")
     raise RuntimeError(f"Unexpected bpftool payload for pinned map '{map_path}': {type(payload).__name__}")
+
+
+def run_bpftool_clear(map_entries: list[tuple[str, list[dict[str, Any]]]]) -> None:
+    """Delete captured map entries in one bpftool batch, using their raw key bytes."""
+    commands: list[str] = []
+    seen_commands: set[str] = set()
+    for map_path, entries in map_entries:
+        if not map_path:
+            raise RuntimeError("No pinned BPF map path was provided")
+        if not os.path.exists(map_path):
+            raise RuntimeError(f"Missing pinned BPF map: {map_path}")
+        if any(character.isspace() for character in map_path):
+            raise RuntimeError(f"Cannot clear pinned BPF map with whitespace in its path: {map_path!r}")
+
+        for index, entry in enumerate(entries):
+            key = entry.get("key") if isinstance(entry, dict) else None
+            if not isinstance(key, list) or not key:
+                raise RuntimeError(
+                    f"Cannot clear pinned BPF map '{map_path}': entry {index} has no raw byte-array key"
+                )
+
+            key_bytes: list[str] = []
+            for byte in key:
+                if isinstance(byte, bool):
+                    raise RuntimeError(
+                        f"Cannot clear pinned BPF map '{map_path}': entry {index} has an invalid key byte"
+                    )
+                try:
+                    if isinstance(byte, int):
+                        byte_value = byte
+                    elif isinstance(byte, str):
+                        try:
+                            byte_value = int(byte, 0)
+                        except ValueError:
+                            byte_value = int(byte, 10)
+                    else:
+                        raise ValueError("key byte is not an integer")
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"Cannot clear pinned BPF map '{map_path}': entry {index} has an invalid key byte"
+                    ) from exc
+                if not 0 <= byte_value <= 0xFF:
+                    raise RuntimeError(
+                        f"Cannot clear pinned BPF map '{map_path}': entry {index} has an invalid key byte"
+                    )
+                key_bytes.append(f"0x{byte_value:02x}")
+
+            command = f"map delete pinned {map_path} key hex {' '.join(key_bytes)}"
+            if command not in seen_commands:
+                seen_commands.add(command)
+                commands.append(command)
+
+    if not commands:
+        return
+
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".bpftool", delete=True) as batch_file:
+            batch_file.write("\n".join(commands) + "\n")
+            batch_file.flush()
+            proc = subprocess.run(
+                ["bpftool", "batch", "file", batch_file.name],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+    except FileNotFoundError as exc:
+        raise RuntimeError("bpftool executable not found while clearing pinned maps") from exc
+
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip() or "no output"
+        raise RuntimeError(f"bpftool failed to clear pinned maps: {detail}")
 
 
 def make_map_key(pid: int, cpu: int) -> tuple[int, int]:
@@ -86,5 +158,3 @@ def load_label_thresholds(path: str | Path | None) -> dict[str, float]:
     if not isinstance(data, dict):
         raise RuntimeError(f"Label thresholds file is malformed: {path}")
     return {str(k): float(v) for k, v in data.items()}
-
-

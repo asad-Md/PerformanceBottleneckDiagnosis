@@ -131,7 +131,8 @@ class Predictor:
                 break
 
             cycle_id += 1
-            cycle_start_ns = time.perf_counter_ns() if cycle_callback is not None else None
+            cycle_started_ns = time.perf_counter_ns()
+            cycle_start_ns = cycle_started_ns if cycle_callback is not None else None
             actual_interval_ms = (
                 (cycle_start_ns - previous_cycle_start_ns) / 1_000_000
                 if cycle_start_ns is not None and previous_cycle_start_ns is not None
@@ -163,7 +164,7 @@ class Predictor:
                         "confidence": confidence,
                     }
                     payload.append(item)
-                    if item["is_bottleneck"] and confidence is not None and confidence > 50.0:
+                    if item["is_bottleneck"] and confidence is not None and confidence > 80.0:
                         qualifying_positions.append(position)
 
                 attributor = getattr(self, "attributor", None)
@@ -295,13 +296,16 @@ class Predictor:
             if cycle_start_ns is not None:
                 previous_cycle_start_ns = cycle_start_ns
 
+            now_ns = time.perf_counter_ns()
+            next_cycle_ns = cycle_started_ns + int(self.config.polling_interval_s * 1_000_000_000)
+            remaining_s = max(0.0, (next_cycle_ns - now_ns) / 1_000_000_000)
             if benchmark_end_ns is not None:
-                remaining_s = (benchmark_end_ns - time.perf_counter_ns()) / 1_000_000_000
-                if remaining_s <= 0:
+                benchmark_remaining_s = (benchmark_end_ns - now_ns) / 1_000_000_000
+                if benchmark_remaining_s <= 0:
                     break
-                time.sleep(min(self.config.polling_interval_s, remaining_s))
-            else:
-                time.sleep(self.config.polling_interval_s)
+                remaining_s = min(remaining_s, benchmark_remaining_s)
+            if remaining_s > 0:
+                time.sleep(remaining_s)
 
     @staticmethod
     def _timing_ms(duration_ns: int | None) -> float | None:
