@@ -62,7 +62,6 @@ desktop.ini
 *.joblib
 *.h5
 *.keras
-*.pt
 *.pth
 *.onnx
 
