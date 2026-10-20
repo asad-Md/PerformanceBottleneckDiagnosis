@@ -26,12 +26,30 @@ export function StatusHeader({ snapshot }: StatusHeaderProps) {
             <strong>{new Date(snapshot.currentTimestamp).toLocaleTimeString([], timeOptions)} UTC</strong>
         </div>
         <div className="metaItem">
-          <span className="metaLabel">Last update</span>
-            <strong>{new Date(snapshot.lastUpdated).toLocaleTimeString([], timeOptions)} UTC</strong>
+          <span className="metaLabel">Last polled</span>
+          <strong>{new Date(snapshot.lastPolled).toLocaleTimeString([], timeOptions)} UTC</strong>
         </div>
         <div className="metaItem">
-          <span className="metaLabel">Detected</span>
-          <strong>{snapshot.bottleneckCount}</strong>
+          <span className="metaLabel">Sample timestamp (CLOCK_MONOTONIC ns)</span>
+          <strong>
+            {snapshot.sampleTimestampStatus === 'available' && snapshot.sampleTimestampNs
+              ? snapshot.sampleTimestampNs
+              : snapshot.sampleTimestampStatus === 'invalid'
+                ? 'Invalid map timestamp'
+                : 'Unavailable'}
+          </strong>
+        </div>
+        <div className="metaItem">
+          <span className="metaLabel">Sample age</span>
+          <strong>
+            {snapshot.sampleAgeSeconds === null
+              ? `Unavailable${snapshot.connectionStatus === 'stale' ? ' · stale' : ''}`
+              : `${snapshot.sampleAgeSeconds.toFixed(1)} s${snapshot.connectionStatus === 'stale' ? ' · stale' : ''}`}
+          </strong>
+        </div>
+        <div className="metaItem">
+          <span className="metaLabel">Processes</span>
+          <strong>{snapshot.processCount}</strong>
         </div>
       </div>
     </header>

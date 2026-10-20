@@ -3,7 +3,7 @@ import { DiagnosisPanel } from './components/DiagnosisPanel';
 import { EventStream } from './components/EventStream';
 import { HistoryTable } from './components/HistoryTable';
 import { StatusHeader } from './components/StatusHeader';
-import { createRealtimeAdapter } from './services/realtimeAdapter';
+import { createRealtimeAdapter, createRealtimeErrorSnapshot } from './services/realtimeAdapter';
 import type { RealtimeSnapshot } from './types/realtime';
 
 const adapter = createRealtimeAdapter();
@@ -13,17 +13,26 @@ export function App() {
 
   useEffect(() => {
     let isMounted = true;
+    let requestPending = false;
 
     async function load() {
-      const result = await adapter.loadSnapshot();
-      if (isMounted) {
-        setSnapshot(result);
+      if (requestPending) return;
+      requestPending = true;
+      try {
+        const result = await adapter.loadSnapshot();
+        if (isMounted) setSnapshot(result);
+      } catch (error) {
+        if (isMounted) setSnapshot(createRealtimeErrorSnapshot(error));
+      } finally {
+        requestPending = false;
       }
     }
 
     load();
+    const interval = window.setInterval(load, 5000);
     return () => {
       isMounted = false;
+      window.clearInterval(interval);
     };
   }, []);
 
@@ -38,7 +47,7 @@ export function App() {
 
         <p className="systemSummary">{snapshot.summary}</p>
 
-        <DiagnosisPanel prediction={snapshot.prediction} metrics={snapshot.metrics} />
+        <DiagnosisPanel prediction={snapshot.prediction} metrics={snapshot.metrics} models={snapshot.models} connectionStatus={snapshot.connectionStatus} />
 
         <EventStream events={snapshot.events} />
 

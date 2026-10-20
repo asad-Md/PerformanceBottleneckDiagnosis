@@ -1,71 +1,137 @@
-import type { RealtimeFeatureMetric, RealtimePredictionResult } from '../types/realtime';
+import type {
+  ModelStatuses,
+  RealtimeFeatureMetric,
+  RealtimePredictionResult,
+  RealtimeSnapshot,
+} from '../types/realtime';
 
 interface DiagnosisPanelProps {
   prediction: RealtimePredictionResult | null;
   metrics: RealtimeFeatureMetric[];
+  models: ModelStatuses;
+  connectionStatus: RealtimeSnapshot['connectionStatus'];
 }
 
-export function DiagnosisPanel({ prediction, metrics }: DiagnosisPanelProps) {
-  if (!prediction) {
-    return (
-      <section className="panel diagnosisPanel">
-        <div className="panelHeader">
-          <div>
-            <p className="eyebrow">Current diagnosis</p>
-            <h2>Waiting for realtime analysis</h2>
-          </div>
-          <span className="labelBadge">Waiting</span>
-        </div>
-      </section>
-    );
-  }
-
-  const identityMetrics = [
-    { label: 'Process', value: prediction.comm },
-    { label: 'PID', value: String(prediction.pid) },
-    { label: 'CPU', value: String(prediction.cpu) },
-    { label: 'Prediction', value: prediction.prediction },
-    { label: 'Class', value: String(prediction.pred_class) },
-    { label: 'Bottleneck', value: prediction.is_bottleneck ? 'Yes' : 'No' },
-  ];
+export function DiagnosisPanel({ prediction, metrics, models, connectionStatus }: DiagnosisPanelProps) {
+  const attribution = prediction?.attribution_prediction;
+  const severity = prediction?.severity_prediction;
+  const isLive = connectionStatus === 'live';
 
   return (
     <section className="panel diagnosisPanel">
       <div className="panelHeader">
         <div>
-          <p className="eyebrow">Current diagnosis</p>
-          <h2>{prediction.is_bottleneck ? 'Bottleneck detected' : 'No bottleneck detected'}</h2>
+          <p className="eyebrow">Process diagnosis</p>
+          <h2>{prediction ? `${prediction.comm} · PID ${prediction.pid}` : 'No process selected'}</h2>
         </div>
-        <span className="labelBadge">{prediction.is_bottleneck ? 'Active' : 'Stable'}</span>
+        <span className="labelBadge">{isLive ? 'LIVE eBPF' : 'DISCONNECTED'}</span>
       </div>
 
-      <div className="diagnosisIdentity">
-        {identityMetrics.map((metric) => (
-          <div key={metric.label} className="identityItem">
-            <span>{metric.label}</span>
-            <strong>{metric.value}</strong>
-          </div>
-        ))}
-        <div className="identityItem confidenceItem">
-          <span>Confidence</span>
-          <strong>{prediction.confidence}%</strong>
+      {prediction ? (
+        <div className="diagnosisIdentity">
+          <div className="identityItem"><span>Process</span><strong>{prediction.comm}</strong></div>
+          <div className="identityItem"><span>PID</span><strong>{prediction.pid}</strong></div>
+          <div className="identityItem"><span>CPU ID</span><strong>{prediction.cpu}</strong></div>
+          <div className="identityItem"><span>Missing raw metrics</span><strong>{prediction.missing_metrics.length}</strong></div>
         </div>
-      </div>
+      ) : null}
 
-      <div className="supportingSignals">
+      <section className="supportingSignals">
         <div className="supportingSignalsHeader">
-          <p className="eyebrow">Supporting signals</p>
-          <span>Observed by the realtime pipeline</span>
+          <p className="eyebrow">Champion V7 · Severity</p>
+          <span>Binary Random Forest · High vs Not-High</span>
         </div>
-        <div className="detailGrid">
-        {metrics.map((metric) => (
-          <div key={metric.label} className="detailItem">
-            <span>{metric.label}</span>
-            <strong>{metric.value} <small>{metric.unit}</small></strong>
+        {!models.champion_v7.available || !severity?.available ? (
+          <p className="modelError">
+            {severity?.error ?? models.champion_v7.error ?? 'Champion V7 severity is unavailable.'}
+          </p>
+        ) : (
+          <>
+            <div className="detailGrid">
+              <div className="detailItem">
+                <span>Severity</span><strong>{severity.prediction}</strong>
+              </div>
+              <div className="detailItem">
+                <span>High probability</span>
+                <strong>{severity.high_probability === undefined ? '—' : `${(severity.high_probability * 100).toFixed(1)}%`}</strong>
+              </div>
+              <div className="detailItem">
+                <span>Decision threshold</span>
+                <strong>{severity.threshold === undefined ? '—' : `${(severity.threshold * 100).toFixed(1)}%`}</strong>
+              </div>
+            </div>
+            {severity.zero_filled_inputs?.length ? (
+              <p className="modelNote">
+                Zero-filled live inputs: {severity.zero_filled_inputs.join(', ')}.
+              </p>
+            ) : null}
+          </>
+        )}
+      </section>
+
+      <section className="supportingSignals">
+        <div className="supportingSignalsHeader">
+          <p className="eyebrow">Baseline MLP · Attribution</p>
+          <span>Sigmoid output scores · 50% decision threshold</span>
+        </div>
+        {!models.attribution_mlp.available || !attribution?.available ? (
+          <p className="modelError">
+            {attribution?.error ?? models.attribution_mlp.error ?? 'Attribution is unavailable.'}
+          </p>
+        ) : (
+          <>
+            <p className="attributionLabels">
+              {attribution.labels?.length
+                ? `Selected labels: ${attribution.labels.join(', ')}`
+                : 'Valid model result: no labels crossed the decision threshold.'}
+            </p>
+            <div className="detailGrid">
+              {Object.entries(attribution.probabilities ?? {}).map(([label, probability]) => {
+                const selected = attribution.labels?.includes(label) ?? false;
+                return (
+                  <div key={label} className="detailItem">
+                    <span>{label}{selected ? ' · Selected' : ''}</span>
+                    <strong>{(probability * 100).toFixed(1)}<small>% score</small></strong>
+                    <div
+                      role="progressbar"
+                      aria-label={`${label} sigmoid output score`}
+                      aria-valuenow={probability * 100}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      style={{ height: 6, background: '#e5e7eb', borderRadius: 4, marginTop: 8 }}
+                    >
+                      <div style={{ width: `${Math.max(0, Math.min(100, probability * 100))}%`, height: '100%', background: '#64748b', borderRadius: 4 }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </section>
+
+      <section className="supportingSignals">
+        <div className="supportingSignalsHeader">
+          <p className="eyebrow">Live process metrics</p>
+          <span>Observed eBPF counters</span>
+        </div>
+        {metrics.length ? (
+          <div className="detailGrid">
+            {metrics.map((metric) => (
+              <div key={metric.id} className="detailItem" title={metric.description}>
+                <span>{metric.label}</span>
+                <strong>
+                  {metric.value === null
+                    ? 'Not collected'
+                    : <>{new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(metric.value)} <small>{metric.unit}</small></>}
+                </strong>
+              </div>
+            ))}
           </div>
-        ))}
-        </div>
-      </div>
+        ) : (
+          <p className="modelNote">No process metrics are available in this snapshot.</p>
+        )}
+      </section>
     </section>
   );
 }

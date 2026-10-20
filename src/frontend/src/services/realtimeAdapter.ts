@@ -1,129 +1,289 @@
-import type { RealtimeSnapshot, RealtimePredictionResult, RealtimeFeatureRow, RealtimeHistoryItem, RealtimeEventItem, RealtimeFeatureMetric } from '../types/realtime';
+import type {
+  AttributionPrediction,
+  ModelStatuses,
+  RealtimeEventItem,
+  RealtimeFeatureMetric,
+  RealtimeHistoryItem,
+  RealtimePredictionResult,
+  RealtimeSnapshot,
+  SeverityPrediction,
+} from '../types/realtime';
 
-const featureRow: RealtimeFeatureRow = {
-  timestamp_ns: 1724692953000000000,
-  pid: 3219,
-  cpu: 3,
-  comm: 'stress-ng',
-  ctx_switches: 18400,
-  voluntary_switches: 9500,
-  involuntary_switches: 6200,
-  cpu_migrations: 142,
-  total_runtime_ns: 960000000,
-  stall_ns: 2450000,
-  avg_stall_ns: 2450000,
-  max_stall_ns: 4500000,
-  latency_count: 15,
-  avg_runq_ratio: 0.68,
-  minor_faults: 312,
-  major_faults: 212,
-  kmalloc_count: 851,
-  kfree_count: 824,
-  total_alloc_bytes: 781000000,
-  total_free_bytes: 702000000,
-  large_page_allocs: 58,
-  syscall_count: 4238,
-  avg_syscall_latency_ns: 2960000,
-  max_syscall_latency_ns: 5200000,
-  read_count: 1100,
-  write_count: 890,
-  read_bytes: 1820000,
-  write_bytes: 880000,
-  mmap_count: 224,
-  futex_count: 631,
-  avg_futex_latency_ns: 640000,
-  epoll_count: 42,
-  avg_epoll_latency_ns: 240000,
-  poll_count: 90,
-  syscall_error_count: 18,
-  mutex_contentions: 842,
-  avg_mutex_wait_ns: 1720000,
-  max_mutex_wait_ns: 3900000,
-  rwsem_read_contentions: 398,
-  avg_rwsem_read_wait_ns: 990000,
-  rwsem_write_contentions: 400,
-  avg_rwsem_write_wait_ns: 1100000,
-  max_rwsem_write_wait_ns: 3000000,
-  session_label: 'cpu_stress',
-};
+const API_BASE = 'http://127.0.0.1:8000';
+let pendingSnapshot: Promise<RealtimeSnapshot> | null = null;
 
-const prediction: RealtimePredictionResult = {
-  pid: 3219,
-  cpu: 3,
-  comm: 'stress-ng',
-  pred_class: 3,
-  prediction: 'High',
-  is_bottleneck: true,
-  confidence: 94,
-};
+function modelStatuses(value: any): ModelStatuses {
+  const status = (model: any, name: string) => ({
+    available: Boolean(model?.available),
+    status: model?.status ?? 'unavailable',
+    checkpoint: model?.checkpoint ?? name,
+    error: model?.error ?? null,
+  });
 
-const metrics: RealtimeFeatureMetric[] = [
-  { id: 'runtime', label: 'Runtime', value: 960, unit: 'ms', delta: 18, direction: 'up', description: 'Observed runtime', source: 'total_runtime_ns' },
-  { id: 'ctxSwitches', label: 'Context Switches', value: 18400, unit: 'count', delta: 21, direction: 'up', description: 'Observed scheduling activity', source: 'ctx_switches' },
-  { id: 'stall', label: 'Average Stall Time', value: 2.45, unit: 'ms', delta: 12, direction: 'up', description: 'Observed stall duration', source: 'avg_stall_ns' },
-  { id: 'syscallLatency', label: 'Average Syscall Latency', value: 2.96, unit: 'ms', delta: 15, direction: 'up', description: 'Observed syscall latency', source: 'avg_syscall_latency_ns' },
-  { id: 'lockContention', label: 'Lock Contentions', value: 1240, unit: 'ops', delta: 18, direction: 'up', description: 'Observed lock activity', source: 'lock_pressure' },
-  { id: 'memoryPressure', label: 'Major Page Faults', value: 212, unit: 'faults', delta: 9, direction: 'up', description: 'Observed major page faults', source: 'major_faults' },
-];
+  return {
+    champion_v7: status(value?.champion_v7, 'Champion V7'),
+    attribution_mlp: status(value?.attribution_mlp, 'baseline_original_best.pt'),
+  };
+}
 
-const history: RealtimeHistoryItem[] = [
-  {
-    timestamp: '21:42:33',
-    comm: 'stress-ng',
-    pid: 3219,
-    cpu: 3,
-    prediction: 'High',
-    pred_class: 3,
-    is_bottleneck: true,
-    confidence: 94,
-  },
-  {
-    timestamp: '21:42:15',
-    comm: 'python',
-    pid: 512,
-    cpu: 1,
-    prediction: 'Medium',
-    pred_class: 2,
-    is_bottleneck: true,
-    confidence: 82,
-  },
-  {
-    timestamp: '21:41:56',
-    comm: 'kworker',
-    pid: 1842,
-    cpu: 5,
-    prediction: 'Low',
-    pred_class: 1,
-    is_bottleneck: false,
-    confidence: 61,
-  },
-];
+function sampleDetails(process: any) {
+  const value = process.sample_timestamp_ns;
+  const isValidTimestamp = typeof value === 'string'
+    && /^\d+$/.test(value)
+    && BigInt(value) > 0n;
+  const status = process.sample_timestamp_status === 'invalid'
+    ? 'invalid'
+    : process.sample_timestamp_status === 'available' && isValidTimestamp
+      ? 'available'
+      : 'unavailable';
+  const age = process.data_age_seconds;
 
-const events: RealtimeEventItem[] = [
-  { time: '21:42:33', text: 'PID 3219 CPU 3 stress-ng bottleneck detected at 94% confidence.', level: 'critical' },
-  { time: '21:42:31', text: 'Context-switch and runqueue activity rose above the recent baseline.', level: 'warning' },
-  { time: '21:42:28', text: 'System call latency increased and lock contention remained elevated.', level: 'warning' },
-  { time: '21:42:11', text: 'Normal baseline established prior to the active contention window.', level: 'info' },
-];
+  return {
+    timestampNs: status === 'available' ? value as string : null,
+    timestampStatus: status as 'available' | 'unavailable' | 'invalid',
+    ageSeconds: status === 'available'
+      && typeof age === 'number'
+      && Number.isFinite(age)
+      && age >= 0
+      ? age
+      : null,
+  };
+}
 
-export const mockRealtimeSnapshot: RealtimeSnapshot = {
-  currentTimestamp: '2026-08-26T21:42:33Z',
-  lastUpdated: '2026-08-26T21:42:33Z',
-  connectionStatus: 'live',
-  statusLabel: 'BOTTLENECK DETECTED',
-  summary: 'Realtime classification is currently identifying a CPU bottleneck for the active process.',
-  bottleneckCount: 1,
-  prediction,
-  metrics,
-  featureRow,
-  history,
-  events,
-};
+function makeMetrics(process: any): RealtimeFeatureMetric[] {
+  const values = process.metrics ?? process;
+  const missing = new Set<string>(process.missing_metrics ?? []);
+  const metric = (
+    id: string,
+    label: string,
+    source: string,
+    unit: string,
+    scale = 1,
+    derived?: number,
+  ): RealtimeFeatureMetric => {
+    const raw = derived ?? values[source];
+    return {
+      id,
+      label,
+      value: missing.has(source) || typeof raw !== 'number' || !Number.isFinite(raw)
+        ? null
+        : raw / scale,
+      unit,
+      direction: 'flat',
+      description: missing.has(source) ? 'Not present in the current eBPF snapshot' : `Live eBPF metric: ${source}`,
+      source,
+    };
+  };
+  const lockFields = ['mutex_contentions', 'rwsem_read_contentions', 'rwsem_write_contentions'];
+  const lockPressure = lockFields.some((field) => missing.has(field))
+    ? undefined
+    : lockFields.reduce((total, field) => total + Number(values[field] ?? 0), 0);
+
+  return [
+    metric('runtime', 'Total Runtime', 'total_runtime_ns', 'ms', 1e6),
+    metric('ctxSwitches', 'Context Switches', 'ctx_switches', 'count'),
+    metric('voluntarySwitches', 'Voluntary Switches', 'voluntary_switches', 'count'),
+    metric('involuntarySwitches', 'Involuntary Switches', 'involuntary_switches', 'count'),
+    metric('cpuMigrations', 'CPU Migrations', 'cpu_migrations', 'count'),
+    metric('minorFaults', 'Minor Page Faults', 'minor_faults', 'faults'),
+    metric('majorFaults', 'Major Page Faults', 'major_faults', 'faults'),
+    metric('allocBytes', 'Allocated Bytes', 'total_alloc_bytes', 'bytes'),
+    metric('freeCount', 'Free Operations', 'kfree_count', 'count'),
+    metric('syscallCount', 'Syscall Count', 'syscall_count', 'count'),
+    metric('syscallLatency', 'Average Syscall Latency', 'avg_syscall_latency_ns', 'ms', 1e6),
+    metric('maxSyscallLatency', 'Maximum Syscall Latency', 'max_syscall_latency_ns', 'ms', 1e6),
+    metric('readBytes', 'Read Bytes', 'read_bytes', 'bytes'),
+    metric('writeBytes', 'Write Bytes', 'write_bytes', 'bytes'),
+    metric('lockContention', 'Lock Contentions', 'lock_pressure', 'count', 1, lockPressure),
+    metric('mutexWait', 'Average Mutex Wait', 'avg_mutex_wait_ns', 'ms', 1e6),
+    metric('rwsemRead', 'RW Semaphore Read Contention', 'rwsem_read_contentions', 'count'),
+    metric('rwsemWrite', 'RW Semaphore Write Contention', 'rwsem_write_contentions', 'count'),
+  ];
+}
+
+function makeSnapshot(data: any): RealtimeSnapshot {
+  const processes = Array.isArray(data.processes) ? data.processes : [];
+  const models = modelStatuses(data.models);
+  const now = new Date().toISOString();
+  const isFresh = (process: any) => {
+    const sample = sampleDetails(process);
+    return data.source_status === 'live'
+      && process.data_status === 'live'
+      && sample.timestampStatus === 'available'
+      && sample.ageSeconds !== null;
+  };
+  const selected = processes.find((process: any) =>
+    isFresh(process)
+      && process.severity_prediction?.available
+      && process.attribution_prediction?.available,
+  ) ?? processes.find((process: any) =>
+    isFresh(process)
+      && (process.severity_prediction?.available || process.attribution_prediction?.available),
+  ) ?? processes.find(isFresh) ?? processes[0];
+
+  if (!selected) {
+    return {
+      currentTimestamp: now,
+      lastPolled: now,
+      sampleTimestampNs: null,
+      sampleTimestampClock: 'CLOCK_MONOTONIC',
+      sampleTimestampStatus: 'unavailable',
+      sampleAgeSeconds: null,
+      connectionStatus: 'live',
+      statusLabel: 'LIVE eBPF — NO PROCESSES',
+      summary: data.source_error ?? 'The live API responded, but the eBPF maps returned no process metrics.',
+      processCount: 0,
+      prediction: null,
+      metrics: [],
+      history: [],
+      events: [],
+      models,
+    };
+  }
+
+  const attribution = selected.attribution_prediction as AttributionPrediction;
+  const severity = selected.severity_prediction as SeverityPrediction;
+  const sample = sampleDetails(selected);
+  const prediction: RealtimePredictionResult = {
+    pid: Number(selected.pid),
+    cpu: Number(selected.cpu ?? 0),
+    comm: String(selected.comm || 'unknown'),
+    attribution_prediction: attribution,
+    severity_prediction: severity,
+    missing_metrics: selected.missing_metrics ?? [],
+  };
+
+  const historyProcesses = [selected, ...processes.filter((process: any) => process !== selected)].slice(0, 20);
+  const history: RealtimeHistoryItem[] = historyProcesses.map((process: any) => {
+    const processSample = sampleDetails(process);
+    return {
+      sample_timestamp_ns: processSample.timestampNs,
+      sample_timestamp_clock: 'CLOCK_MONOTONIC',
+      sample_timestamp_status: processSample.timestampStatus,
+      sample_age_seconds: processSample.ageSeconds,
+      data_status: process.data_status === 'live' ? 'live' : 'stale',
+      comm: String(process.comm || 'unknown'),
+      pid: Number(process.pid),
+      cpu: Number(process.cpu ?? 0),
+      attribution_labels: process.attribution_prediction?.available
+        ? process.attribution_prediction.labels
+        : null,
+      attribution_status: process.attribution_prediction?.status ?? 'unavailable',
+      severity_prediction: process.severity_prediction,
+    };
+  });
+
+  const labels = attribution?.available ? attribution.labels ?? [] : [];
+  const events: RealtimeEventItem[] = [
+    {
+      time: new Date().toLocaleTimeString(),
+      text: `${selected.data_status === 'stale' ? 'Stale' : 'Live'} eBPF metrics for PID ${selected.pid} CPU ${selected.cpu} (${selected.comm}).`,
+      level: 'info' as const,
+    },
+  ];
+  if (!attribution?.available) {
+    events.push({
+      time: new Date().toLocaleTimeString(),
+      text: `Attribution unavailable: ${attribution?.error ?? models.attribution_mlp.error ?? 'no attribution result returned'}`,
+      level: 'warning' as const,
+    });
+  } else if (!labels.length) {
+    events.push({
+      time: new Date().toLocaleTimeString(),
+      text: 'The attribution model returned no labels above its decision threshold.',
+      level: 'info' as const,
+    });
+  } else {
+    events.push({
+      time: new Date().toLocaleTimeString(),
+      text: `Attribution labels: ${labels.join(', ')}.`,
+      level: 'warning' as const,
+    });
+  }
+
+  const attributionNote = models.attribution_mlp.available
+    ? 'Attribution model loaded.'
+    : `Attribution unavailable: ${models.attribution_mlp.error ?? 'model failed to load'}.`;
+
+  return {
+    currentTimestamp: now,
+    lastPolled: now,
+    sampleTimestampNs: sample.timestampNs,
+    sampleTimestampClock: 'CLOCK_MONOTONIC',
+    sampleTimestampStatus: sample.timestampStatus,
+    sampleAgeSeconds: sample.ageSeconds,
+    connectionStatus: !isFresh(selected) ? 'stale' : 'live',
+    statusLabel: !isFresh(selected) ? 'STALE eBPF' : 'LIVE eBPF',
+    summary: `${!isFresh(selected) ? 'Stale' : 'Live'} eBPF data for ${processes.length} processes. Showing PID ${selected.pid} CPU ${selected.cpu} (${selected.comm}); counters are accumulated observations, not instantaneous rates. ${attributionNote}`,
+    processCount: processes.length,
+    prediction,
+    metrics: makeMetrics(selected),
+    history,
+    events,
+    models,
+  };
+}
+
+export function createRealtimeErrorSnapshot(error: unknown): RealtimeSnapshot {
+  const now = new Date().toISOString();
+  const message = error instanceof Error ? error.message : String(error);
+  const unavailable = (checkpoint: string) => ({
+    available: false,
+    status: 'unavailable' as const,
+    checkpoint,
+    error: message,
+  });
+
+  return {
+    currentTimestamp: now,
+    lastPolled: now,
+    sampleTimestampNs: null,
+    sampleTimestampClock: 'CLOCK_MONOTONIC',
+    sampleTimestampStatus: 'unavailable',
+    sampleAgeSeconds: null,
+    connectionStatus: 'disconnected',
+    statusLabel: 'BACKEND UNAVAILABLE',
+    summary: `Live data request failed: ${message}`,
+    processCount: 0,
+    prediction: null,
+    metrics: [],
+    history: [],
+    events: [],
+    models: {
+      champion_v7: unavailable('Champion V7'),
+      attribution_mlp: unavailable('baseline_original_best.pt'),
+    },
+  };
+}
 
 export function createRealtimeAdapter() {
   return {
-    async loadSnapshot(): Promise<RealtimeSnapshot> {
-      return mockRealtimeSnapshot;
+    loadSnapshot(): Promise<RealtimeSnapshot> {
+      if (!pendingSnapshot) {
+        pendingSnapshot = (async () => {
+          const response = await fetch(`${API_BASE}/api/live`, {
+            signal: AbortSignal.timeout(60000),
+          });
+          if (!response.ok) {
+            let detail = `Live API returned HTTP ${response.status}`;
+            try {
+              const body = await response.json();
+              if (typeof body.detail === 'string') detail = body.detail;
+            } catch {
+              // Keep the HTTP status when the error response has no JSON body.
+            }
+            throw new Error(detail);
+          }
+          return makeSnapshot(await response.json());
+        })();
+      }
+
+      const currentRequest = pendingSnapshot;
+      return currentRequest.finally(() => {
+        if (pendingSnapshot === currentRequest) {
+          pendingSnapshot = null;
+        }
+      });
     },
   };
 }

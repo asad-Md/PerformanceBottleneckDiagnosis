@@ -20,7 +20,7 @@
 #include <unistd.h>
 
 #define META_FILE "/tmp/perf_session.meta"
-#define PIN_BASE "/sys/fs/bpf"
+#define PIN_BASE "/sys/fs/bpf/pbd_test"
 #define MAX_PROGRAMS 64
 
 static volatile sig_atomic_t running = 1;
@@ -63,19 +63,19 @@ static int remove_stale_pins(const char *pin_base)
     return failed ? -1 : 0;
 }
 
-static int write_session_metadata(uint64_t start_ns, uint64_t end_ns)
+static int write_session_metadata(const char *meta_path, uint64_t start_ns, uint64_t end_ns)
 {
-    FILE *meta = fopen(META_FILE, "w");
+    FILE *meta = fopen(meta_path, "w");
     if (!meta) {
         fprintf(stderr, "[realtime-pinner] could not write %s: %s\n",
-                META_FILE, strerror(errno));
+                meta_path, strerror(errno));
         return -1;
     }
     int result = fprintf(meta, "start_ns=%llu\nend_ns=%llu\n",
                          (unsigned long long)start_ns,
                          (unsigned long long)end_ns);
     if (fclose(meta) != 0 || result < 0) {
-        fprintf(stderr, "[realtime-pinner] failed writing %s\n", META_FILE);
+        fprintf(stderr, "[realtime-pinner] failed writing %s\n", meta_path);
         return -1;
     }
     return 0;
@@ -85,10 +85,13 @@ int main(int argc, char **argv)
 {
     const char *object_path = getenv("REALTIME_BPF_OBJECT_PATH");
     const char *pin_base = getenv("REALTIME_PIN_BASE");
+    const char *meta_file = getenv("REALTIME_META_FILE");
     if (!object_path || !object_path[0])
         object_path = "./realtime_monitor.bpf.o";
     if (!pin_base || !pin_base[0])
         pin_base = PIN_BASE;
+    if (!meta_file || !meta_file[0])
+        meta_file = META_FILE;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--obj") == 0 && i + 1 < argc) {
             object_path = argv[++i];
@@ -172,7 +175,7 @@ int main(int argc, char **argv)
     fprintf(stderr, "[realtime-pinner] all %zu required probes attached\n", link_count);
 
     uint64_t start_ns = monotonic_ns();
-    if (!start_ns || write_session_metadata(start_ns, 0) != 0) {
+    if (!start_ns || write_session_metadata(meta_file, start_ns, 0) != 0) {
         for (size_t i = 0; i < link_count; i++)
             bpf_link__destroy(links[i]);
         bpf_object__close(object);
@@ -184,7 +187,7 @@ int main(int argc, char **argv)
         sleep(1);
 
     uint64_t end_ns = monotonic_ns();
-    int metadata_error = write_session_metadata(start_ns, end_ns);
+    int metadata_error = write_session_metadata(meta_file, start_ns, end_ns);
     for (size_t i = 0; i < link_count; i++)
         bpf_link__destroy(links[i]);
     bpf_object__close(object);

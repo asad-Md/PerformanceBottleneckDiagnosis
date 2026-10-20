@@ -13,37 +13,40 @@ export function HistoryTable({ items }: HistoryTableProps) {
           <h2>Recent results</h2>
         </div>
       </div>
-
-      <div className="tableWrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Process</th>
-              <th>PID</th>
-              <th>CPU</th>
-              <th>Prediction</th>
-              <th>Class</th>
-              <th>Bottleneck</th>
-              <th>Confidence</th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.map((item) => (
-              <tr key={`${item.timestamp}-${item.pid}`}>
-                <td>{item.timestamp}</td>
-                <td>{item.comm}</td>
-                <td>{item.pid}</td>
-                <td>{item.cpu}</td>
-                <td>{item.prediction}</td>
-                <td>{item.pred_class}</td>
-                <td>{item.is_bottleneck ? 'Yes' : 'No'}</td>
-                <td>{item.confidence}%</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {items.length === 0 ? (
+          <p>No process results are present in the current live snapshot.</p>
+      ) : (
+        <div className="tableWrap">
+          <table>
+            <thead>
+              <tr><th>Sample timestamp (CLOCK_MONOTONIC ns)</th><th>Sample age</th><th>Process</th><th>PID</th><th>CPU</th><th>Champion V7 severity</th><th>MLP attribution</th></tr>
+            </thead>
+            <tbody>
+              {items.map((item) => (
+                <tr key={`${item.sample_timestamp_ns ?? item.sample_timestamp_status}-${item.pid}-${item.cpu}`}>
+                  <td>{item.sample_timestamp_status === 'available' && item.sample_timestamp_ns
+                    ? item.sample_timestamp_ns
+                    : item.sample_timestamp_status === 'invalid'
+                      ? 'Invalid map timestamp'
+                      : 'Unavailable'}</td>
+                  <td>{item.sample_age_seconds === null
+                    ? `Unavailable${item.data_status === 'stale' ? ' · stale' : ''}`
+                    : `${item.sample_age_seconds.toFixed(1)} s${item.data_status === 'stale' ? ' · stale' : ''}`}</td>
+                  <td>{item.comm}</td>
+                  <td>{item.pid}</td>
+                  <td>{item.cpu}</td>
+                  <td>{item.severity_prediction?.available ? item.severity_prediction.prediction : 'Unavailable'}</td>
+                  <td>{item.attribution_status !== 'available'
+                    ? `Unavailable (${item.attribution_status})`
+                    : item.attribution_labels?.length
+                      ? item.attribution_labels.join(', ')
+                      : 'No labels above threshold'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </section>
   );
 }

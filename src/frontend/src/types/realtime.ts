@@ -1,84 +1,72 @@
-export type ConnectionStatus = 'live' | 'disconnected' | 'reconnecting';
-export type BottleneckPrediction = 'Normal' | 'Low' | 'Medium' | 'High';
-export type SeverityLabel = 'LOW' | 'MEDIUM' | 'HIGH' | 'NORMAL';
+export type ConnectionStatus = 'live' | 'stale' | 'disconnected' | 'reconnecting';
+export type SeverityLabel = 'High' | 'Not-High';
+
+export interface ModelStatus {
+  available: boolean;
+  status: 'available' | 'unavailable' | 'error';
+  checkpoint: string;
+  error?: string | null;
+}
+
+export interface ModelStatuses {
+  champion_v7: ModelStatus;
+  attribution_mlp: ModelStatus;
+}
+
+export interface SeverityPrediction {
+  available: boolean;
+  status: 'available' | 'unavailable' | 'error';
+  prediction?: SeverityLabel;
+  is_bottleneck?: boolean;
+  confidence?: number;
+  high_probability?: number;
+  class_probabilities?: Record<SeverityLabel, number>;
+  threshold?: number;
+  zero_filled_inputs?: string[];
+  error?: string | null;
+}
+
+export interface AttributionPrediction {
+  available: boolean;
+  status: 'available' | 'unavailable' | 'error';
+  model: string;
+  labels: string[] | null;
+  probabilities: Record<string, number> | null;
+  threshold: number | null;
+  error?: string | null;
+}
 
 export interface RealtimePredictionResult {
   pid: number;
   cpu: number;
   comm: string;
-  pred_class: number;
-  prediction: BottleneckPrediction;
-  is_bottleneck: boolean;
-  confidence: number;
-}
-
-export interface RealtimeFeatureRow {
-  timestamp_ns: number;
-  pid: number;
-  cpu: number;
-  comm: string;
-  ctx_switches: number;
-  voluntary_switches: number;
-  involuntary_switches: number;
-  cpu_migrations: number;
-  total_runtime_ns: number;
-  stall_ns: number;
-  avg_stall_ns: number;
-  max_stall_ns: number;
-  latency_count: number;
-  avg_runq_ratio: number;
-  minor_faults: number;
-  major_faults: number;
-  kmalloc_count: number;
-  kfree_count: number;
-  total_alloc_bytes: number;
-  total_free_bytes: number;
-  large_page_allocs: number;
-  syscall_count: number;
-  avg_syscall_latency_ns: number;
-  max_syscall_latency_ns: number;
-  read_count: number;
-  write_count: number;
-  read_bytes: number;
-  write_bytes: number;
-  mmap_count: number;
-  futex_count: number;
-  avg_futex_latency_ns: number;
-  epoll_count: number;
-  avg_epoll_latency_ns: number;
-  poll_count: number;
-  syscall_error_count: number;
-  mutex_contentions: number;
-  avg_mutex_wait_ns: number;
-  max_mutex_wait_ns: number;
-  rwsem_read_contentions: number;
-  avg_rwsem_read_wait_ns: number;
-  rwsem_write_contentions: number;
-  avg_rwsem_write_wait_ns: number;
-  max_rwsem_write_wait_ns: number;
-  session_label?: string;
+  attribution_prediction: AttributionPrediction;
+  severity_prediction: SeverityPrediction;
+  missing_metrics: string[];
 }
 
 export interface RealtimeFeatureMetric {
   id: string;
   label: string;
-  value: number;
+  value: number | null;
   unit: string;
-  delta: number;
-  direction: 'up' | 'down';
+  direction: 'up' | 'down' | 'flat';
   description: string;
   source?: string;
 }
 
 export interface RealtimeHistoryItem {
-  timestamp: string;
+  sample_timestamp_ns: string | null;
+  sample_timestamp_clock: 'CLOCK_MONOTONIC';
+  sample_timestamp_status: 'available' | 'unavailable' | 'invalid';
+  sample_age_seconds: number | null;
+  data_status: 'live' | 'stale';
   comm: string;
   pid: number;
   cpu: number;
-  prediction: BottleneckPrediction;
-  pred_class: number;
-  is_bottleneck: boolean;
-  confidence: number;
+  attribution_labels: string[] | null;
+  attribution_status: string;
+  severity_prediction?: SeverityPrediction;
 }
 
 export interface RealtimeEventItem {
@@ -89,14 +77,18 @@ export interface RealtimeEventItem {
 
 export interface RealtimeSnapshot {
   currentTimestamp: string;
-  lastUpdated: string;
+  lastPolled: string;
+  sampleTimestampNs: string | null;
+  sampleTimestampClock: 'CLOCK_MONOTONIC';
+  sampleTimestampStatus: 'available' | 'unavailable' | 'invalid';
+  sampleAgeSeconds: number | null;
   connectionStatus: ConnectionStatus;
-  statusLabel: 'HEALTHY' | 'WARNING' | 'BOTTLENECK DETECTED' | 'CRITICAL';
+  statusLabel: 'LIVE eBPF' | 'STALE eBPF' | 'LIVE eBPF — NO PROCESSES' | 'BACKEND UNAVAILABLE';
   summary: string;
-  bottleneckCount: number;
+  processCount: number;
   prediction: RealtimePredictionResult | null;
   metrics: RealtimeFeatureMetric[];
-  featureRow: RealtimeFeatureRow | null;
   history: RealtimeHistoryItem[];
   events: RealtimeEventItem[];
+  models: ModelStatuses;
 }
