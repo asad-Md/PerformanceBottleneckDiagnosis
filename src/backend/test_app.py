@@ -11,13 +11,42 @@ from unittest.mock import patch
 import joblib
 import numpy as np
 from fastapi import HTTPException
-from fastapi.testclient import TestClient
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 
 from src.backend import app as backend
 from src.backend import live_reader
 
 
 class BackendModelIntegrationTests(unittest.TestCase):
+    def test_live_response_direct_json_render_matches_fastapi_encoder(self) -> None:
+        with patch("src.backend.app.read_live_processes", return_value=[]):
+            direct = backend.live()
+
+        legacy_payload = {
+            "source": "live_ebpf",
+            "source_status": "empty",
+            "source_error": "The four pinned maps are readable but contain no process entries.",
+            "count": 0,
+            "models": backend.model_statuses(),
+            "processes": [],
+        }
+        legacy = JSONResponse(content=jsonable_encoder(legacy_payload))
+        self.assertIsInstance(direct, JSONResponse)
+        self.assertEqual(direct.status_code, legacy.status_code)
+        self.assertEqual(direct.media_type, legacy.media_type)
+        self.assertEqual(json.loads(direct.body), json.loads(legacy.body))
+
+    def test_direct_and_legacy_render_match_null_and_non_finite_semantics(self) -> None:
+        for value in (None, float("nan"), float("inf"), float("-inf")):
+            outcomes = []
+            for content in (value, jsonable_encoder(value)):
+                try:
+                    outcomes.append(("body", JSONResponse(content=content).body))
+                except Exception as exc:
+                    outcomes.append((type(exc), None))
+            self.assertEqual(outcomes[0], outcomes[1])
+
     def test_live_reader_pin_base_defaults_and_environment_override(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(live_reader.get_pin_dir(), Path("/sys/fs/bpf/pbd_test"))
@@ -327,6 +356,154 @@ class BackendModelIntegrationTests(unittest.TestCase):
         self.assertFalse(result["available"])
         self.assertIn("avg_runq_ratio", result["missing_features"])
 
+    def test_champion_batch_matches_scalar_and_isolates_invalid_rows(self) -> None:
+        class Model:
+            classes_ = np.array([0, 1])
+
+            def __init__(self):
+                self.batch_sizes = []
+
+            def predict_proba(self, features):
+                self.batch_sizes.append(len(features))
+                high = features["ctx_switches"].to_numpy(dtype=float) / 100.0
+                return np.column_stack((1.0 - high, high))
+
+        def raw_row(pid: int, ctx_switches: float) -> dict:
+            row = {feature: float(index + 1) for index, feature in enumerate(backend.CHAMPION_RAW_REQUIRED)}
+            row.update({"pid": pid, "ctx_switches": ctx_switches})
+            return row
+
+        first = raw_row(101, 10)
+        second = raw_row(202, 20)
+        model = Model()
+        with patch.object(backend, "champion_model", model):
+            scalar = [backend.predict_champion(row) for row in (first, second)]
+            self.assertEqual(model.batch_sizes, [1, 1])
+            model.batch_sizes.clear()
+
+            batched = backend.predict_champion_batch([first, second])
+
+            self.assertEqual(model.batch_sizes, [2])
+            self.assertEqual(
+                [result["prediction"] for result in batched],
+                [result["prediction"] for result in scalar],
+            )
+            np.testing.assert_allclose(
+                [result["high_probability"] for result in batched],
+                [result["high_probability"] for result in scalar],
+                rtol=0,
+                atol=1e-6,
+            )
+
+            missing = raw_row(303, 30)
+            missing.pop("avg_runq_ratio")
+            invalid = raw_row(404, 40)
+            invalid["total_runtime_ns"] = -2.0  # makes training's log1p feature non-finite
+            mixed = backend.predict_champion_batch([first, missing, invalid, second])
+
+        self.assertTrue(mixed[0]["available"])
+        self.assertFalse(mixed[1]["available"])
+        self.assertIn("avg_runq_ratio", mixed[1]["missing_features"])
+        self.assertFalse(mixed[2]["available"])
+        self.assertIn("log_total_runtime_ns", mixed[2]["missing_features"])
+        self.assertTrue(mixed[3]["available"])
+        self.assertEqual(model.batch_sizes, [2, 2])
+
+    def test_mlp_batch_matches_scalar_and_isolates_missing_or_invalid_rows(self) -> None:
+        class Attributor:
+            feature_columns = ["second", "first"]
+            target_columns = ["CPU", "Lock"]
+            THRESHOLD = 0.5
+
+            def __init__(self):
+                self.batch_sizes = []
+
+            def predict(self, features):
+                self.batch_sizes.append(len(features))
+                first = features["first"].to_numpy(dtype=float)
+                second = features["second"].to_numpy(dtype=float)
+                cpu = first / (first + second)
+                return np.column_stack((cpu, 1.0 - cpu))
+
+        rows = [
+            {"first": 3.0, "second": 1.0},
+            {"first": 1.0, "second": 3.0},
+        ]
+        model = Attributor()
+        with patch.object(backend, "attributor", model):
+            scalar = [backend.predict_mlp(row) for row in rows]
+            self.assertEqual(model.batch_sizes, [1, 1])
+            model.batch_sizes.clear()
+
+            batched = backend.predict_mlp_batch(rows)
+
+            self.assertEqual(model.batch_sizes, [2])
+            for batch_result, scalar_result in zip(batched, scalar):
+                self.assertEqual(batch_result["labels"], scalar_result["labels"])
+                np.testing.assert_allclose(
+                    [batch_result["probabilities"][name] for name in model.target_columns],
+                    [scalar_result["probabilities"][name] for name in model.target_columns],
+                    rtol=0,
+                    atol=1e-6,
+                )
+
+            missing = {"first": 2.0}
+            invalid = {"first": float("nan"), "second": 2.0}
+            mixed = backend.predict_mlp_batch(
+                [rows[0], missing, invalid, rows[1]],
+                [[], [], [], []],
+            )
+
+        self.assertTrue(mixed[0]["available"])
+        self.assertFalse(mixed[1]["available"])
+        self.assertEqual(mixed[1]["missing_features"], ["second"])
+        self.assertEqual(mixed[2]["status"], "error")
+        self.assertFalse(mixed[2]["available"])
+        self.assertTrue(mixed[3]["available"])
+        self.assertEqual(model.batch_sizes, [2, 2])
+
+    def test_prediction_batch_helpers_accept_empty_batches(self) -> None:
+        self.assertEqual(backend.predict_champion_batch([]), [])
+        self.assertEqual(backend.predict_mlp_batch([]), [])
+
+    def test_saved_models_batched_predictions_match_scalar_on_complete_fixture(self) -> None:
+        self.assertIsNotNone(backend.champion_model)
+        self.assertIsNotNone(backend.attributor)
+        input_columns = sorted(
+            set(backend.CHAMPION_RAW_REQUIRED) | set(backend.attributor.feature_columns)
+        )
+
+        def complete_fixture(offset: int) -> dict:
+            return {
+                feature: float(offset + index + 1)
+                for index, feature in enumerate(input_columns)
+            }
+
+        rows = [complete_fixture(1), complete_fixture(3)]
+        champion_scalar = [backend.predict_champion(row) for row in rows]
+        champion_batch = backend.predict_champion_batch(rows)
+        self.assertEqual(
+            [result["prediction"] for result in champion_batch],
+            [result["prediction"] for result in champion_scalar],
+        )
+        np.testing.assert_allclose(
+            [result["high_probability"] for result in champion_batch],
+            [result["high_probability"] for result in champion_scalar],
+            rtol=0,
+            atol=1e-6,
+        )
+
+        mlp_scalar = [backend.predict_mlp(row) for row in rows]
+        mlp_batch = backend.predict_mlp_batch(rows)
+        for batch_result, scalar_result in zip(mlp_batch, mlp_scalar):
+            self.assertEqual(batch_result["labels"], scalar_result["labels"])
+            np.testing.assert_allclose(
+                [batch_result["probabilities"][name] for name in backend.attributor.target_columns],
+                [scalar_result["probabilities"][name] for name in backend.attributor.target_columns],
+                rtol=0,
+                atol=1e-6,
+            )
+
     def test_current_map_schema_reports_exact_unsupported_attribution_features(self) -> None:
         with patch("src.backend.live_reader.dump_map") as dump_map:
             dump_map.side_effect = [
@@ -479,19 +656,19 @@ class BackendModelIntegrationTests(unittest.TestCase):
         self.assertFalse(result["severity_prediction"]["available"])
         self.assertIn("avg_runq_ratio", result["severity_prediction"]["missing_features"])
 
-    @patch("src.backend.app.predict_mlp")
+    @patch("src.backend.app.predict_mlp_batch")
     @patch("src.backend.app.predict_champion_batch")
     @patch("src.backend.app.read_live_processes")
     def test_live_response_keeps_severity_when_attribution_is_unavailable(
-        self, read, predict_champion_batch, predict_mlp
+        self, read, predict_champion_batch, predict_mlp_batch
     ) -> None:
         read.return_value = [{"pid": 123, "cpu": 0, "comm": "fixture", "session_label": "live_ebpf", "data_status": "live", "sample_timestamp_ns": 123_456_789, "sample_timestamp_clock": "CLOCK_MONOTONIC", "sample_timestamp_status": "available", "data_age_seconds": 0.25, "ctx_switches": 10, "missing_metrics": ["avg_syscall_latency_ns"]}]
-        predict_mlp.return_value = {
+        predict_mlp_batch.return_value = [{
             "available": False, "status": "unavailable", "model": "baseline_original_best.pt",
             "probabilities": None, "labels": None, "threshold": None,
             "error": "Required live attribution features are unavailable: stall_ns",
             "missing_features": ["stall_ns"],
-        }
+        }]
         predict_champion_batch.return_value = [{
             "available": True,
             "status": "available",
@@ -502,7 +679,7 @@ class BackendModelIntegrationTests(unittest.TestCase):
             "threshold": 0.5,
         }]
 
-        payload = backend.live()
+        payload = backend._live_payload()
 
         self.assertEqual(payload["source"], "live_ebpf")
         self.assertEqual(payload["count"], 1)
@@ -511,25 +688,76 @@ class BackendModelIntegrationTests(unittest.TestCase):
         self.assertEqual(process["attribution_prediction"]["missing_features"], ["stall_ns"])
         self.assertEqual(process["severity_prediction"]["prediction"], "High")
         self.assertEqual(process["process"]["pid"], 123)
+        self.assertEqual((process["pid"], process["cpu"], process["comm"]), (123, 0, "fixture"))
         self.assertEqual(process["sample_timestamp_ns"], "123456789")
         self.assertEqual(process["sample_timestamp_clock"], "CLOCK_MONOTONIC")
         self.assertEqual(process["sample_timestamp_status"], "available")
         self.assertEqual(process["data_age_seconds"], 0.25)
         self.assertNotIn("sample_timestamp_ns", process["metrics"])
+        self.assertNotIn("data_status", process["metrics"])
+        self.assertNotIn("missing_metrics", process["metrics"])
+        self.assertEqual(process["metrics"]["ctx_switches"], 10)
+        self.assertNotIn("ctx_switches", process)
+        self.assertNotIn("avg_syscall_latency_ns", process["metrics"])
         self.assertIn("models", payload)
         self.assertIn("avg_syscall_latency_ns", process["missing_metrics"])
         self.assertIn("stall_ns", process["missing_metrics"])
 
+    @patch("src.backend.app.predict_mlp_batch")
+    @patch("src.backend.app.predict_champion_batch")
+    @patch("src.backend.app.read_live_processes")
+    def test_live_predictions_remain_attached_to_their_pid_cpu_rows(
+        self, read, predict_champion_batch, predict_mlp_batch
+    ) -> None:
+        common = {
+            "comm": "fixture", "session_label": "live_ebpf", "data_status": "live",
+            "sample_timestamp_ns": 123_456_789, "sample_timestamp_clock": "CLOCK_MONOTONIC",
+            "sample_timestamp_status": "available", "data_age_seconds": 0.25,
+            "missing_metrics": [],
+        }
+        read.return_value = [
+            {**common, "pid": 123, "cpu": 0, "ctx_switches": 10},
+            {**common, "pid": 999, "cpu": 1, "data_status": "stale", "ctx_switches": 15},
+            {**common, "pid": 456, "cpu": 3, "ctx_switches": 20},
+        ]
+        predict_champion_batch.side_effect = lambda rows: [
+            {"available": True, "prediction": "High" if row["pid"] == 123 else "Not-High"}
+            for row in rows
+        ]
+        predict_mlp_batch.side_effect = lambda rows, _missing: [
+            {
+                "available": True,
+                "labels": ["CPU"] if row["pid"] == 123 else ["Lock"],
+                "probabilities": {"CPU": 0.9} if row["pid"] == 123 else {"Lock": 0.8},
+            }
+            for row in rows
+        ]
+
+        payload = backend._live_payload()
+
+        first, stale, second = payload["processes"]
+        predict_champion_batch.assert_called_once()
+        predict_mlp_batch.assert_called_once()
+        self.assertEqual([row["pid"] for row in predict_champion_batch.call_args.args[0]], [123, 456])
+        self.assertEqual([row["pid"] for row in predict_mlp_batch.call_args.args[0]], [123, 456])
+        self.assertEqual((first["pid"], first["cpu"], first["metrics"]["ctx_switches"]), (123, 0, 10))
+        self.assertEqual((first["severity_prediction"]["prediction"], first["attribution_prediction"]["labels"]), ("High", ["CPU"]))
+        self.assertEqual((second["pid"], second["cpu"], second["metrics"]["ctx_switches"]), (456, 3, 20))
+        self.assertEqual((second["severity_prediction"]["prediction"], second["attribution_prediction"]["labels"]), ("Not-High", ["Lock"]))
+        self.assertEqual(stale["pid"], 999)
+        self.assertEqual(stale["severity_prediction"]["status"], "unavailable")
+        self.assertEqual(stale["attribution_prediction"]["status"], "unavailable")
+
     @patch("src.backend.app.read_live_processes", return_value=[])
     def test_live_response_supports_empty_metrics(self, _read) -> None:
-        response = backend.live()
+        response = backend._live_payload()
         self.assertEqual(response["count"], 0)
         self.assertEqual(response["processes"], [])
 
     @patch("src.backend.app.read_live_processes", side_effect=RuntimeError("maps unavailable"))
     def test_unavailable_live_metrics_return_service_unavailable(self, _read) -> None:
         with self.assertRaises(HTTPException) as caught:
-            backend.live()
+            backend._live_payload()
         self.assertEqual(caught.exception.status_code, 503)
 
     def test_missing_and_incompatible_champion_artifacts_fail_explicitly(self) -> None:

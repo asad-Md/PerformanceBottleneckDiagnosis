@@ -48,8 +48,12 @@ export function StatusHeader({ snapshot }: StatusHeaderProps) {
           </strong>
         </div>
         <div className="metaItem">
-          <span className="metaLabel">Processes</span>
+          <span className="metaLabel">PID/CPU rows</span>
           <strong>{snapshot.processCount}</strong>
+        </div>
+        <div className="metaItem">
+          <span className="metaLabel">Fresh / stale rows</span>
+          <strong>{snapshot.freshRowCount} / {snapshot.staleRowCount}</strong>
         </div>
       </div>
     </header>

@@ -3,14 +3,33 @@ import type {
   ModelStatuses,
   RealtimeEventItem,
   RealtimeFeatureMetric,
-  RealtimeHistoryItem,
+  RealtimeObservation,
   RealtimePredictionResult,
   RealtimeSnapshot,
   SeverityPrediction,
 } from '../types/realtime';
 
 const API_BASE = 'http://127.0.0.1:8000';
+const STALE_INFERENCE_REASON = 'Map snapshot is stale; no live inference was run.';
 let pendingSnapshot: Promise<RealtimeSnapshot> | null = null;
+
+export function formatUnavailablePrediction(
+  prediction: { available: boolean; status?: string; error?: string | null } | null | undefined,
+  dataStatus: 'live' | 'stale',
+): string {
+  if (prediction?.available) return 'Available';
+  if (
+    dataStatus === 'stale'
+    && prediction?.status === 'unavailable'
+    && prediction.error === STALE_INFERENCE_REASON
+  ) {
+    return 'Skipped — stale data';
+  }
+  if (prediction?.status === 'error') {
+    return prediction.error ? `Error — ${prediction.error}` : 'Inference error';
+  }
+  return prediction?.error ? `Unavailable — ${prediction.error}` : 'Unavailable';
+}
 
 function modelStatuses(value: any): ModelStatuses {
   const status = (model: any, name: string) => ({
@@ -101,7 +120,7 @@ function makeMetrics(process: any): RealtimeFeatureMetric[] {
   ];
 }
 
-function makeSnapshot(data: any): RealtimeSnapshot {
+export function makeSnapshot(data: any): RealtimeSnapshot {
   const processes = Array.isArray(data.processes) ? data.processes : [];
   const models = modelStatuses(data.models);
   const now = new Date().toISOString();
@@ -112,6 +131,8 @@ function makeSnapshot(data: any): RealtimeSnapshot {
       && sample.timestampStatus === 'available'
       && sample.ageSeconds !== null;
   };
+  const freshRowCount = processes.filter(isFresh).length;
+  const staleRowCount = processes.length - freshRowCount;
   const selected = processes.find((process: any) =>
     isFresh(process)
       && process.severity_prediction?.available
@@ -133,9 +154,12 @@ function makeSnapshot(data: any): RealtimeSnapshot {
       statusLabel: 'LIVE eBPF — NO PROCESSES',
       summary: data.source_error ?? 'The live API responded, but the eBPF maps returned no process metrics.',
       processCount: 0,
+      freshRowCount,
+      staleRowCount,
       prediction: null,
       metrics: [],
-      history: [],
+      observations: [],
+      observationCount: 0,
       events: [],
       models,
     };
@@ -153,15 +177,29 @@ function makeSnapshot(data: any): RealtimeSnapshot {
     missing_metrics: selected.missing_metrics ?? [],
   };
 
-  const historyProcesses = [selected, ...processes.filter((process: any) => process !== selected)].slice(0, 20);
-  const history: RealtimeHistoryItem[] = historyProcesses.map((process: any) => {
+  const observationProcesses = processes
+    .filter((process: any) => process !== selected)
+    .sort((left: any, right: any) => {
+      const leftTimestamp = sampleDetails(left).timestampNs;
+      const rightTimestamp = sampleDetails(right).timestampNs;
+      if (leftTimestamp && rightTimestamp) {
+        const leftNs = BigInt(leftTimestamp);
+        const rightNs = BigInt(rightTimestamp);
+        return leftNs > rightNs ? -1 : leftNs < rightNs ? 1 : 0;
+      }
+      if (leftTimestamp) return -1;
+      if (rightTimestamp) return 1;
+      return 0;
+    })
+    .slice(0, 20);
+  const observations: RealtimeObservation[] = observationProcesses.map((process: any) => {
     const processSample = sampleDetails(process);
     return {
       sample_timestamp_ns: processSample.timestampNs,
       sample_timestamp_clock: 'CLOCK_MONOTONIC',
       sample_timestamp_status: processSample.timestampStatus,
       sample_age_seconds: processSample.ageSeconds,
-      data_status: process.data_status === 'live' ? 'live' : 'stale',
+      data_status: isFresh(process) ? 'live' : 'stale',
       comm: String(process.comm || 'unknown'),
       pid: Number(process.pid),
       cpu: Number(process.cpu ?? 0),
@@ -169,6 +207,7 @@ function makeSnapshot(data: any): RealtimeSnapshot {
         ? process.attribution_prediction.labels
         : null,
       attribution_status: process.attribution_prediction?.status ?? 'unavailable',
+      attribution_prediction: process.attribution_prediction ?? null,
       severity_prediction: process.severity_prediction,
     };
   });
@@ -214,11 +253,14 @@ function makeSnapshot(data: any): RealtimeSnapshot {
     sampleAgeSeconds: sample.ageSeconds,
     connectionStatus: !isFresh(selected) ? 'stale' : 'live',
     statusLabel: !isFresh(selected) ? 'STALE eBPF' : 'LIVE eBPF',
-    summary: `${!isFresh(selected) ? 'Stale' : 'Live'} eBPF data for ${processes.length} processes. Showing PID ${selected.pid} CPU ${selected.cpu} (${selected.comm}); counters are accumulated observations, not instantaneous rates. ${attributionNote}`,
+    summary: `${!isFresh(selected) ? 'Stale' : 'Live'} eBPF data for ${processes.length} PID/CPU rows. Showing PID ${selected.pid} CPU ${selected.cpu} (${selected.comm}); counters are accumulated observations, not instantaneous rates. ${attributionNote}`,
     processCount: processes.length,
+    freshRowCount,
+    staleRowCount,
     prediction,
     metrics: makeMetrics(selected),
-    history,
+    observations,
+    observationCount: Math.max(0, processes.length - 1),
     events,
     models,
   };
@@ -245,9 +287,12 @@ export function createRealtimeErrorSnapshot(error: unknown): RealtimeSnapshot {
     statusLabel: 'BACKEND UNAVAILABLE',
     summary: `Live data request failed: ${message}`,
     processCount: 0,
+    freshRowCount: 0,
+    staleRowCount: 0,
     prediction: null,
     metrics: [],
-    history: [],
+    observations: [],
+    observationCount: 0,
     events: [],
     models: {
       champion_v7: unavailable('Champion V7'),

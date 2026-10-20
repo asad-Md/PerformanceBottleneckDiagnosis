@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 try:
@@ -105,6 +106,11 @@ CHAMPION_RAW_REQUIRED = {
 }
 
 LIVE_RAW_METRIC_FIELDS = ATTRIBUTION_FEATURES
+LIVE_ROW_METADATA_FIELDS = {
+    "pid", "cpu", "comm", "session_label",
+    "sample_timestamp_ns", "sample_timestamp_clock", "sample_timestamp_status",
+    "data_age_seconds", "data_status", "missing_metrics",
+}
 app = FastAPI(title="Performance Bottleneck Diagnosis API")
 
 app.add_middleware(
@@ -177,62 +183,114 @@ def health():
     }
 
 
-def predict_mlp(raw: dict, missing_metrics: list[str] | None = None) -> dict:
+def _mlp_unavailable(error: str, missing_features: list[str] | None = None) -> dict:
+    result = {
+        "available": False,
+        "status": "unavailable",
+        "model": "baseline_original_best.pt",
+        "labels": None,
+        "probabilities": None,
+        "threshold": None,
+        "error": error,
+    }
+    if missing_features is not None:
+        result["missing_features"] = missing_features
+    return result
+
+
+def predict_mlp_batch(
+    raw_rows: list[dict],
+    missing_metrics_rows: list[list[str]] | None = None,
+) -> list[dict]:
+    """Run attribution on complete fresh rows in one model call."""
+    if not raw_rows:
+        return []
+
     if attributor is None:
-        return {
-            "available": False,
-            "status": "unavailable",
-            "model": "baseline_original_best.pt",
-            "labels": None,
-            "probabilities": None,
-            "threshold": None,
-            "error": attribution_error or "Baseline attribution model did not load",
-        }
+        return [
+            _mlp_unavailable(attribution_error or "Baseline attribution model did not load")
+            for _ in raw_rows
+        ]
 
-    absent = sorted(
-        (set(attributor.feature_columns) - set(raw))
-        | set(missing_metrics or ()).intersection(attributor.feature_columns)
+    if missing_metrics_rows is None:
+        missing_metrics_rows = [[] for _ in raw_rows]
+    if len(missing_metrics_rows) != len(raw_rows):
+        raise ValueError("missing_metrics_rows must have one entry per attribution row")
+
+    outputs: list[dict | None] = [None] * len(raw_rows)
+    eligible_indices: list[int] = []
+    for index, (raw, missing_metrics) in enumerate(zip(raw_rows, missing_metrics_rows)):
+        absent = sorted(
+            (set(attributor.feature_columns) - set(raw))
+            | set(missing_metrics).intersection(attributor.feature_columns)
+        )
+        if absent:
+            outputs[index] = _mlp_unavailable(
+                "Required live attribution features are unavailable: " + ", ".join(absent),
+                absent,
+            )
+            continue
+        try:
+            values = np.asarray([raw[column] for column in attributor.feature_columns], dtype=np.float32)
+        except (TypeError, ValueError, OverflowError):
+            outputs[index] = {
+                **_mlp_unavailable("RuntimeError: Realtime attribution features must be numeric"),
+                "status": "error",
+                "missing_features": [],
+            }
+            continue
+        if not np.isfinite(values).all():
+            outputs[index] = {
+                **_mlp_unavailable("RuntimeError: Realtime attribution features contain NaN or infinite values"),
+                "status": "error",
+                "missing_features": [],
+            }
+            continue
+        eligible_indices.append(index)
+
+    if not eligible_indices:
+        return [output for output in outputs if output is not None]
+
+    features = pd.DataFrame(
+        [{column: raw_rows[index][column] for column in attributor.feature_columns}
+         for index in eligible_indices],
+        columns=attributor.feature_columns,
     )
-    if absent:
-        return {
-            "available": False,
-            "status": "unavailable",
-            "model": "baseline_original_best.pt",
-            "labels": None,
-            "probabilities": None,
-            "threshold": None,
-            "error": "Required live attribution features are unavailable: " + ", ".join(absent),
-            "missing_features": absent,
-        }
-
     try:
-        features = pd.DataFrame([raw], columns=attributor.feature_columns)
-        probabilities = attributor.predict(features)[0]
-        labels = attributor.target_columns
-        scores = {name: round(float(score), 6) for name, score in zip(labels, probabilities)}
-        selected = [name for name, score in scores.items() if score >= attributor.THRESHOLD]
-        return {
-            "available": True,
-            "status": "available",
-            "model": "baseline_original_best.pt",
-            "labels": selected,
-            "probabilities": scores,
-            "threshold": attributor.THRESHOLD,
-            "error": None,
-            "missing_features": [],
-        }
+        probabilities_batch = attributor.predict(features)
+        if len(probabilities_batch) != len(eligible_indices):
+            raise RuntimeError("Attribution MLP returned a different number of results than input rows")
+        for index, probabilities in zip(eligible_indices, probabilities_batch):
+            scores = {
+                name: round(float(score), 6)
+                for name, score in zip(attributor.target_columns, probabilities)
+            }
+            selected = [name for name, score in scores.items() if score >= attributor.THRESHOLD]
+            outputs[index] = {
+                "available": True,
+                "status": "available",
+                "model": "baseline_original_best.pt",
+                "labels": selected,
+                "probabilities": scores,
+                "threshold": attributor.THRESHOLD,
+                "error": None,
+                "missing_features": [],
+            }
     except Exception as exc:
-        logging.exception("Baseline attribution inference failed")
-        return {
-            "available": False,
-            "status": "error",
-            "model": "baseline_original_best.pt",
-            "labels": None,
-            "probabilities": None,
-            "threshold": None,
-            "error": f"{type(exc).__name__}: {exc}",
-            "missing_features": [],
-        }
+        logging.exception("Baseline attribution batch inference failed")
+        for index in eligible_indices:
+            outputs[index] = {
+                **_mlp_unavailable(f"{type(exc).__name__}: {exc}"),
+                "status": "error",
+                "missing_features": [],
+            }
+
+    return [output for output in outputs if output is not None]
+
+
+def predict_mlp(raw: dict, missing_metrics: list[str] | None = None) -> dict:
+    """Scalar compatibility wrapper for submitted single-row predictions."""
+    return predict_mlp_batch([raw], [missing_metrics or []])[0]
 
 
 def predict_champion(raw: dict) -> dict:
@@ -307,46 +365,74 @@ def predict_champion_batch(raw_rows: list[dict]) -> list[dict]:
             for _ in raw_rows
         ]
 
-    # Do not let request-model defaults or NaN filling turn absent counters
-    # into apparently observed zeros.
-    unavailable_inputs = [sorted(CHAMPION_RAW_REQUIRED - set(row)) for row in raw_rows]
-    if any(unavailable_inputs):
-        return [
-            {
+    outputs: list[dict | None] = [None] * len(raw_rows)
+    eligible_indices: list[int] = []
+    for index, row in enumerate(raw_rows):
+        absent = sorted(CHAMPION_RAW_REQUIRED - set(row))
+        if absent:
+            outputs[index] = {
                 "available": False,
                 "status": "unavailable",
-                "error": "Live collector does not provide required Champion V7 feature(s): " + ", ".join(missing),
-                "missing_features": missing,
+                "error": "Live collector does not provide required Champion V7 feature(s): " + ", ".join(absent),
+                "missing_features": absent,
             }
-            for missing in unavailable_inputs
-        ]
+            continue
+        try:
+            raw_values = np.asarray([row[column] for column in CHAMPION_RAW_REQUIRED], dtype=float)
+        except (TypeError, ValueError, OverflowError):
+            outputs[index] = {
+                "available": False,
+                "status": "unavailable",
+                "error": "Required Champion V7 live inputs are not numeric.",
+                "missing_features": [],
+            }
+            continue
+        if not np.isfinite(raw_values).all():
+            outputs[index] = {
+                "available": False,
+                "status": "unavailable",
+                "error": "Required Champion V7 live inputs contain NaN or infinite values.",
+                "missing_features": [],
+            }
+            continue
+        eligible_indices.append(index)
 
+    if not eligible_indices:
+        return [output for output in outputs if output is not None]
+
+    eligible_rows = [raw_rows[index] for index in eligible_indices]
     try:
-        featured = engineer_features_v5(pd.DataFrame(raw_rows))
+        featured = engineer_features_v5(pd.DataFrame(eligible_rows))
         feature_frame = featured.reindex(columns=CHAMPION_FEATURE_COLS)
-        invalid_rows = ~np.isfinite(feature_frame.to_numpy(dtype=float)).all(axis=1)
-        if invalid_rows.any():
-            return [
-                ({"available": False, "status": "unavailable",
-                  "error": "Required Champion V7 features are non-finite in the live snapshot.",
-                  "missing_features": [
-                      feature for feature, value in feature_frame.iloc[index].items()
-                      if not np.isfinite(float(value))
-                  ]}
-                 if invalid_rows[index] else {
-                     "available": False, "status": "unavailable",
-                     "error": "Champion V7 batch rejected because another row has invalid features.",
-                     "missing_features": [],
-                 })
-                for index in range(len(raw_rows))
-            ]
+        feature_values = feature_frame.to_numpy(dtype=float)
+        invalid_rows = ~np.isfinite(feature_values).all(axis=1)
+        valid_batch_positions = []
+        for batch_index, is_invalid in enumerate(invalid_rows):
+            original_index = eligible_indices[batch_index]
+            if is_invalid:
+                outputs[original_index] = {
+                    "available": False,
+                    "status": "unavailable",
+                    "error": "Required Champion V7 features are non-finite in the live snapshot.",
+                    "missing_features": [
+                        feature for feature, value in feature_frame.iloc[batch_index].items()
+                        if not np.isfinite(float(value))
+                    ],
+                }
+            else:
+                valid_batch_positions.append(batch_index)
 
-        probabilities_batch = champion_model.predict_proba(feature_frame)
+        if not valid_batch_positions:
+            return [output for output in outputs if output is not None]
+
+        probabilities_batch = champion_model.predict_proba(
+            feature_frame.iloc[valid_batch_positions]
+        )
+        if len(probabilities_batch) != len(valid_batch_positions):
+            raise RuntimeError("Champion V7 returned a different number of results than input rows")
         classes = list(champion_model.classes_)
         high_index = classes.index(1)
-        predictions = []
-
-        for probabilities in probabilities_batch:
+        for batch_position, probabilities in zip(valid_batch_positions, probabilities_batch):
             high_probability = float(probabilities[high_index])
             predicted_class = int(high_probability >= CHAMPION_THRESHOLD)
             class_probabilities = {
@@ -355,7 +441,7 @@ def predict_champion_batch(raw_rows: list[dict]) -> list[dict]:
                 )
                 for label, probability in zip(classes, probabilities)
             }
-            predictions.append({
+            outputs[eligible_indices[batch_position]] = {
                 "available": True,
                 "status": "available",
                 "pred_class": predicted_class,
@@ -368,20 +454,19 @@ def predict_champion_batch(raw_rows: list[dict]) -> list[dict]:
                 "class_probabilities": class_probabilities,
                 "threshold": CHAMPION_THRESHOLD,
                 "zero_filled_inputs": [],
-            })
-
-        return predictions
+            }
 
     except Exception as exc:
         logging.exception("Champion V7 batch inference failed")
-        return [
-            {
-                "available": False,
-                "status": "error",
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-            for _ in raw_rows
-        ]
+        for index in eligible_indices:
+            if outputs[index] is None:
+                outputs[index] = {
+                    "available": False,
+                    "status": "error",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+
+    return [output for output in outputs if output is not None]
 
 
 @app.post("/api/predict")
@@ -403,6 +488,11 @@ def predict(data: ProcessMetrics):
 @app.get("/api/live")
 def live():
     """Read live eBPF metrics and run the severity and attribution models."""
+    return JSONResponse(content=_live_payload())
+
+
+def _live_payload() -> dict:
+    """Build the existing /api/live JSON payload before response rendering."""
     try:
         processes = read_live_processes()
         if not processes:
@@ -414,47 +504,67 @@ def live():
                 "models": model_statuses(),
                 "processes": [],
             }
-        results = []
-        severity_predictions = [
-            ({"available": False, "status": "unavailable", "error": "Map snapshot is stale; no live inference was run."}
-             if row.get("data_status") != "live" else predict_champion_batch([row])[0])
-            for row in processes
-        ]
-
-        for row, severity in zip(processes, severity_predictions):
-            missing_metrics = sorted(
+        missing_by_index = [
+            sorted(
                 set(row.get("missing_metrics", ())) | LIVE_RAW_METRIC_FIELDS.difference(row)
             )
-            attribution = (
-                {"available": False, "status": "unavailable", "model": "baseline_original_best.pt",
-                 "labels": None, "probabilities": None, "threshold": None,
-                 "error": "Map snapshot is stale; no live inference was run.", "missing_features": []}
-                if row.get("data_status") != "live" else predict_mlp(row, missing_metrics)
-            )
+            for row in processes
+        ]
+        severity_predictions = [
+            {"available": False, "status": "unavailable", "error": "Map snapshot is stale; no live inference was run."}
+            for _ in processes
+        ]
+        attribution_predictions = [
+            {"available": False, "status": "unavailable", "model": "baseline_original_best.pt",
+             "labels": None, "probabilities": None, "threshold": None,
+             "error": "Map snapshot is stale; no live inference was run.", "missing_features": []}
+            for _ in processes
+        ]
+        fresh_indices = [
+            index for index, row in enumerate(processes)
+            if row.get("data_status") == "live"
+        ]
+        fresh_rows = [processes[index] for index in fresh_indices]
+        fresh_severity = predict_champion_batch(fresh_rows)
+        fresh_attribution = predict_mlp_batch(
+            fresh_rows,
+            [missing_by_index[index] for index in fresh_indices],
+        )
+        for index, severity, attribution in zip(
+            fresh_indices, fresh_severity, fresh_attribution
+        ):
+            severity_predictions[index] = severity
+            attribution_predictions[index] = attribution
+
+        results = []
+        for index, row in enumerate(processes):
             results.append({
-                **row,
+                "pid": row["pid"],
+                "cpu": row["cpu"],
+                "comm": row["comm"],
+                "session_label": row["session_label"],
                 # Emit the monotonic nanosecond counter as decimal text so
                 # JavaScript never rounds its integer representation.
                 "sample_timestamp_ns": (
                     str(row["sample_timestamp_ns"])
                     if row.get("sample_timestamp_ns") is not None else None
                 ),
+                "sample_timestamp_clock": row.get("sample_timestamp_clock"),
+                "sample_timestamp_status": row.get("sample_timestamp_status", "unavailable"),
+                "data_age_seconds": row.get("data_age_seconds"),
+                "data_status": row.get("data_status", "stale"),
                 "process": {
                     "pid": row["pid"],
                     "cpu": row["cpu"],
                     "comm": row["comm"],
                     "session_label": row["session_label"],
                 },
-                "attribution_prediction": attribution,
-                "severity_prediction": severity,
-                "missing_metrics": missing_metrics,
+                "attribution_prediction": attribution_predictions[index],
+                "severity_prediction": severity_predictions[index],
+                "missing_metrics": missing_by_index[index],
                 "metrics": {
                     key: value for key, value in row.items()
-                    if key not in {
-                        "pid", "cpu", "comm", "session_label",
-                        "sample_timestamp_ns", "sample_timestamp_clock",
-                        "sample_timestamp_status",
-                    }
+                    if key not in LIVE_ROW_METADATA_FIELDS
                 },
             })
 

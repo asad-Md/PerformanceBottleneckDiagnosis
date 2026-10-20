@@ -51,7 +51,7 @@ export function App() {
 
         <EventStream events={snapshot.events} />
 
-        <HistoryTable items={snapshot.history} />
+        <HistoryTable items={snapshot.observations} totalCount={snapshot.observationCount} />
       </div>
     </div>
   );

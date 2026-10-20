@@ -24,7 +24,9 @@ export function DiagnosisPanel({ prediction, metrics, models, connectionStatus }
           <p className="eyebrow">Process diagnosis</p>
           <h2>{prediction ? `${prediction.comm} · PID ${prediction.pid}` : 'No process selected'}</h2>
         </div>
-        <span className="labelBadge">{isLive ? 'LIVE eBPF' : 'DISCONNECTED'}</span>
+        <span className="labelBadge">
+          {isLive ? 'LIVE eBPF' : connectionStatus === 'stale' ? 'STALE eBPF' : 'DISCONNECTED'}
+        </span>
       </div>
 
       {prediction ? (

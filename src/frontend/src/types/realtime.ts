@@ -55,7 +55,7 @@ export interface RealtimeFeatureMetric {
   source?: string;
 }
 
-export interface RealtimeHistoryItem {
+export interface RealtimeObservation {
   sample_timestamp_ns: string | null;
   sample_timestamp_clock: 'CLOCK_MONOTONIC';
   sample_timestamp_status: 'available' | 'unavailable' | 'invalid';
@@ -66,6 +66,7 @@ export interface RealtimeHistoryItem {
   cpu: number;
   attribution_labels: string[] | null;
   attribution_status: string;
+  attribution_prediction: AttributionPrediction | null;
   severity_prediction?: SeverityPrediction;
 }
 
@@ -86,9 +87,12 @@ export interface RealtimeSnapshot {
   statusLabel: 'LIVE eBPF' | 'STALE eBPF' | 'LIVE eBPF — NO PROCESSES' | 'BACKEND UNAVAILABLE';
   summary: string;
   processCount: number;
+  freshRowCount: number;
+  staleRowCount: number;
   prediction: RealtimePredictionResult | null;
   metrics: RealtimeFeatureMetric[];
-  history: RealtimeHistoryItem[];
+  observations: RealtimeObservation[];
+  observationCount: number;
   events: RealtimeEventItem[];
   models: ModelStatuses;
 }
