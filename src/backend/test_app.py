@@ -18,7 +18,96 @@ from src.backend import app as backend
 from src.backend import live_reader
 
 
+def _map_metadata_fixture(name: str) -> dict:
+    value_struct, value_size = live_reader.MAP_VALUE_STRUCTS[name]
+    return {
+        "id": 19,
+        "type": "hash",
+        "name": live_reader.MAPS[name],
+        "bytes_key": live_reader.MAP_ABI[name][0],
+        "bytes_value": live_reader.MAP_ABI[name][1],
+        "btf_id": 207,
+        "map_symbol": live_reader.MAPS[name],
+        "key_struct": "agg_key",
+        "key_fields": ["pid", "cpu"],
+        "value_struct": value_struct,
+        "value_struct_size": value_size,
+        "value_fields": sorted(live_reader.MAP_VALUE_FIELDS[name]),
+    }
+
+
+def _raw_btf_fixture(
+    map_name: str,
+    *,
+    value_struct: str | None = None,
+    value_size: int | None = None,
+    value_fields: list[str] | None = None,
+    linked_value_struct: str | None = None,
+) -> str:
+    value_struct = value_struct or live_reader.MAP_VALUE_STRUCTS[map_name][0]
+    value_size = value_size or live_reader.MAP_VALUE_STRUCTS[map_name][1]
+    value_fields = value_fields or sorted(live_reader.MAP_VALUE_FIELDS[map_name])
+    linked_value_struct = linked_value_struct or value_struct
+    lines = [
+        "[1] INT '__u32' size=4 bits_offset=0 nr_bits=32 encoding=(none)",
+        "[2] STRUCT 'agg_key' size=8 vlen=2",
+        "    'pid' type_id=1 bits_offset=0",
+        "    'cpu' type_id=1 bits_offset=32",
+        f"[3] STRUCT '{value_struct}' size={value_size} vlen={len(value_fields)}",
+    ]
+    lines.extend(f"    '{field}' type_id=1 bits_offset={index * 64}"
+                 for index, field in enumerate(value_fields))
+    linked_type_id = 3
+    if linked_value_struct != value_struct:
+        linked_type_id = 5
+        lines.append(
+            f"[5] STRUCT '{linked_value_struct}' size={value_size} vlen={len(value_fields)}"
+        )
+        lines.extend(f"    '{field}' type_id=1 bits_offset={index * 64}"
+                     for index, field in enumerate(value_fields))
+    lines.extend([
+        "[4] PTR '(anon)' type_id=2",
+        f"[{6 if linked_type_id == 5 else 5}] PTR '(anon)' type_id={linked_type_id}",
+        f"[{7 if linked_type_id == 5 else 6}] STRUCT '(anon)' size=16 vlen=2",
+        "    'key' type_id=4 bits_offset=0",
+        f"    'value' type_id={6 if linked_type_id == 5 else 5} bits_offset=64",
+        f"[{8 if linked_type_id == 5 else 7}] VAR '{live_reader.MAPS[map_name]}' "
+        f"type_id={7 if linked_type_id == 5 else 6} linkage=global-alloc",
+        f"[{9 if linked_type_id == 5 else 8}] DATASEC '.maps' size=16 vlen=1",
+        f"    type_id={8 if linked_type_id == 5 else 7} offset=0 size=16",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+def _read_fixture_processes():
+    """Expand concise test values to the complete bpftool struct format."""
+    dump = live_reader.dump_map
+    side_effect = dump.side_effect
+    if side_effect is not None and not callable(side_effect):
+        outcomes = list(side_effect)
+        for map_name, snapshot in zip(live_reader.MAPS, outcomes):
+            if not isinstance(snapshot, list):
+                continue
+            for entry in snapshot:
+                try:
+                    _key, value = live_reader.decode(entry)
+                except (TypeError, ValueError):
+                    continue
+                for field in live_reader.MAP_VALUE_FIELDS[map_name] - set(value):
+                    value[field] = "" if field == "comm" else 0
+        dump.side_effect = outcomes
+    return live_reader.read_live_processes()
+
+
 class BackendModelIntegrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._metadata_patcher = patch(
+            "src.backend.live_reader.get_map_metadata",
+            side_effect=_map_metadata_fixture,
+        )
+        self._metadata_patcher.start()
+        self.addCleanup(self._metadata_patcher.stop)
+
     def test_live_response_direct_json_render_matches_fastapi_encoder(self) -> None:
         with patch("src.backend.app.read_live_processes", return_value=[]):
             direct = backend.live()
@@ -110,7 +199,8 @@ class BackendModelIntegrationTests(unittest.TestCase):
             }),
             ((9, 2), {"ctx_switches": 4}),
         )
-        self.assertIsNone(live_reader.decode({"key": ["bad"], "value": {}}))
+        with self.assertRaisesRegex(ValueError, "malformed bpftool map entry"):
+            live_reader.decode({"key": ["bad"], "value": {}})
 
     @patch("src.backend.live_reader.dump_map")
     def test_live_reader_marks_missing_raw_metrics_without_marking_observed_zero(self, dump_map) -> None:
@@ -127,18 +217,20 @@ class BackendModelIntegrationTests(unittest.TestCase):
             [],
         ]
 
-        process = live_reader.read_live_processes()[0]
+        process = _read_fixture_processes()[0]
 
         self.assertEqual(process["ctx_switches"], 0)
         self.assertNotIn("ctx_switches", process["missing_metrics"])
-        self.assertIn("syscall_count", process["missing_metrics"])
-        self.assertNotIn("mutex_contentions", process)
-        self.assertNotIn("max_mutex_wait_ns", process)
-        self.assertNotIn("rwsem_read_contentions", process)
-        self.assertIn("avg_mutex_wait_ns", process["missing_metrics"])
+        self.assertEqual(process["syscall_count"], 0)
+        self.assertEqual(process["futex_count"], 0)
+        self.assertEqual(process["kmalloc_count"], 0)
+        self.assertEqual(process["mutex_contentions"], 0)
+        self.assertEqual(process["max_mutex_wait_ns"], 0)
+        self.assertEqual(process["rwsem_read_contentions"], 0)
+        self.assertEqual(process["avg_mutex_wait_ns"], 0)
 
     @patch("src.backend.live_reader.dump_map")
-    def test_lock_map_features_preserve_counts_and_only_derive_with_samples(self, dump_map) -> None:
+    def test_lock_map_features_preserve_counts_and_zero_denominator_average(self, dump_map) -> None:
         dump_map.side_effect = [
             [], [], [],
             [{"formatted": {"key": {"pid": 71, "cpu": 2}, "value": {
@@ -151,11 +243,11 @@ class BackendModelIntegrationTests(unittest.TestCase):
             }}}],
         ]
 
-        process = live_reader.read_live_processes()[0]
+        process = _read_fixture_processes()[0]
 
         self.assertEqual(process["mutex_contentions"], 0)
-        self.assertNotIn("avg_mutex_wait_ns", process)
-        self.assertIn("avg_mutex_wait_ns", process["missing_metrics"])
+        self.assertEqual(process["avg_mutex_wait_ns"], 0)
+        self.assertNotIn("avg_mutex_wait_ns", process["missing_metrics"])
         self.assertEqual(process["max_mutex_wait_ns"], 0)
         self.assertEqual(process["rwsem_read_contentions"], 2)
         self.assertEqual(process["avg_rwsem_read_wait_ns"], 60)
@@ -177,7 +269,7 @@ class BackendModelIntegrationTests(unittest.TestCase):
             }}}],
         ]
 
-        process = live_reader.read_live_processes()[0]
+        process = _read_fixture_processes()[0]
         training_average = RealtimeReader.__new__(RealtimeReader)._iavg
 
         self.assertEqual(
@@ -190,7 +282,7 @@ class BackendModelIntegrationTests(unittest.TestCase):
         )
 
     @patch("src.backend.live_reader.dump_map")
-    def test_reader_does_not_observe_avg_stall_with_zero_latency_count(self, dump_map) -> None:
+    def test_reader_matches_baseline_zero_average_with_zero_latency_count(self, dump_map) -> None:
         dump_map.side_effect = [
             [{"formatted": {"key": {"pid": 17, "cpu": 0}, "value": {
                 "stall_ns": 120,
@@ -202,12 +294,12 @@ class BackendModelIntegrationTests(unittest.TestCase):
             [],
         ]
 
-        process = live_reader.read_live_processes()[0]
+        process = _read_fixture_processes()[0]
 
         self.assertEqual(process["stall_ns"], 120)
         self.assertEqual(process["latency_count"], 0)
-        self.assertNotIn("avg_stall_ns", process)
-        self.assertIn("avg_stall_ns", process["missing_metrics"])
+        self.assertEqual(process["avg_stall_ns"], 0)
+        self.assertNotIn("avg_stall_ns", process["missing_metrics"])
 
     @patch("src.backend.live_reader.dump_map")
     def test_reader_preserves_training_pid_cpu_rows(self, dump_map) -> None:
@@ -255,7 +347,7 @@ class BackendModelIntegrationTests(unittest.TestCase):
             ],
         ]
 
-        rows = live_reader.read_live_processes()
+        rows = _read_fixture_processes()
         self.assertEqual(len(rows), 2)
         by_cpu = {row["cpu"]: row for row in rows}
         self.assertEqual(by_cpu[0]["ctx_switches"], 3)
@@ -278,7 +370,7 @@ class BackendModelIntegrationTests(unittest.TestCase):
             }}}], [], [], [],
         ]
 
-        row = live_reader.read_live_processes()[0]
+        row = _read_fixture_processes()[0]
 
         # The training reader uses integer division (sum // count).
         self.assertEqual(row["cpu"], 3)
@@ -297,7 +389,7 @@ class BackendModelIntegrationTests(unittest.TestCase):
             }}}], [], [], [],
         ]
 
-        row = live_reader.read_live_processes()[0]
+        row = _read_fixture_processes()[0]
 
         self.assertEqual(row["sample_timestamp_ns"], 10_000_000_000)
         self.assertEqual(row["sample_timestamp_clock"], "CLOCK_MONOTONIC")
@@ -314,7 +406,7 @@ class BackendModelIntegrationTests(unittest.TestCase):
             }}}], [], [], [],
         ]
 
-        row = live_reader.read_live_processes()[0]
+        row = _read_fixture_processes()[0]
 
         self.assertEqual(row["sample_timestamp_ns"], 1_000_000_000)
         self.assertEqual(row["data_age_seconds"], 49.0)
@@ -322,30 +414,40 @@ class BackendModelIntegrationTests(unittest.TestCase):
 
     @patch("src.backend.live_reader.time.monotonic_ns", return_value=50_000_000_000)
     @patch("src.backend.live_reader.dump_map")
-    def test_live_reader_marks_missing_invalid_and_future_sample_times_unavailable_or_invalid(
+    def test_live_reader_rejects_incomplete_timestamp_and_marks_invalid_or_future_times(
         self, dump_map, _clock
     ) -> None:
         def entry(pid: int, value: dict) -> dict:
             return {"formatted": {"key": {"pid": pid, "cpu": 0}, "value": value}}
 
+        def full_sched(timestamp):
+            value = {
+                field: ("worker" if field == "comm" else 0)
+                for field in live_reader.MAP_VALUE_FIELDS["sched"]
+            }
+            value["ctx_switches"] = 1
+            value["last_update_ns"] = timestamp
+            return value
+
         dump_map.side_effect = [
-            [entry(47, {"ctx_switches": 1}),
-             entry(48, {"ctx_switches": 1, "last_update_ns": "not-a-number"}),
-             entry(49, {"ctx_switches": 1, "last_update_ns": 60_000_000_000})],
+            [entry(48, full_sched("not-a-number")),
+             entry(49, full_sched(60_000_000_000))],
             [], [], [],
         ]
 
-        rows = {row["pid"]: row for row in live_reader.read_live_processes()}
+        rows = {row["pid"]: row for row in _read_fixture_processes()}
 
-        self.assertEqual(rows[47]["sample_timestamp_status"], "unavailable")
-        self.assertIsNone(rows[47]["sample_timestamp_ns"])
-        self.assertIsNone(rows[47]["data_age_seconds"])
-        self.assertEqual(rows[47]["data_status"], "stale")
         for pid in (48, 49):
             self.assertEqual(rows[pid]["sample_timestamp_status"], "invalid")
             self.assertIsNone(rows[pid]["sample_timestamp_ns"])
             self.assertIsNone(rows[pid]["data_age_seconds"])
             self.assertEqual(rows[pid]["data_status"], "stale")
+
+        with patch("src.backend.live_reader.dump_map", side_effect=[
+            [entry(47, {"ctx_switches": 1})], [], [], [],
+        ]):
+            with self.assertRaisesRegex(ValueError, "incomplete 'sched' map value"):
+                live_reader.read_live_processes()
 
     def test_champion_live_inference_rejects_missing_runq_observation(self) -> None:
         raw = backend.ProcessMetrics().model_dump()
@@ -504,7 +606,7 @@ class BackendModelIntegrationTests(unittest.TestCase):
                 atol=1e-6,
             )
 
-    def test_current_map_schema_reports_exact_unsupported_attribution_features(self) -> None:
+    def test_current_map_schema_complete_values_cover_attribution_features(self) -> None:
         with patch("src.backend.live_reader.dump_map") as dump_map:
             dump_map.side_effect = [
                 [{"formatted": {"key": {"pid": 7, "cpu": 0}, "value": {
@@ -526,18 +628,13 @@ class BackendModelIntegrationTests(unittest.TestCase):
                 }}}],
             ]
 
-            process = live_reader.read_live_processes()[0]
+            process = _read_fixture_processes()[0]
 
         self.assertEqual(process["avg_syscall_latency_ns"], 10)
         self.assertEqual(process["avg_mutex_wait_ns"], 20)
-        self.assertEqual(set(process["missing_metrics"]), {
-            "stall_ns", "avg_stall_ns", "max_stall_ns", "latency_count",
-            "kmalloc_count", "mmap_count", "futex_count", "avg_futex_latency_ns",
-            "epoll_count", "avg_epoll_latency_ns", "poll_count", "syscall_error_count",
-            "max_mutex_wait_ns", "avg_rwsem_read_wait_ns",
-        })
+        self.assertEqual(process["missing_metrics"], [])
 
-    def test_reader_marks_zero_denominator_per_syscall_averages_unavailable(self) -> None:
+    def test_reader_returns_zero_for_zero_denominator_averages(self) -> None:
         with patch("src.backend.live_reader.dump_map") as dump_map:
             dump_map.side_effect = [
                 [{"formatted": {"key": {"pid": 31, "cpu": 0}, "value": {
@@ -555,15 +652,322 @@ class BackendModelIntegrationTests(unittest.TestCase):
                 }}}],
             ]
 
-            process = live_reader.read_live_processes()[0]
+            process = _read_fixture_processes()[0]
 
         for metric in (
             "avg_syscall_latency_ns", "avg_futex_latency_ns",
             "avg_epoll_latency_ns", "avg_mutex_wait_ns",
             "avg_rwsem_read_wait_ns",
         ):
-            self.assertNotIn(metric, process)
-            self.assertIn(metric, process["missing_metrics"])
+            self.assertEqual(process[metric], 0)
+            self.assertNotIn(metric, process["missing_metrics"])
+
+    def test_reader_fills_disjoint_map_keys_with_family_specific_zeroes(self) -> None:
+        def complete_value(map_name: str, overrides: dict) -> dict:
+            fields = live_reader.MAP_VALUE_FIELDS[map_name] - {"last_update_ns", "comm"}
+            value = {field: 0 for field in fields}
+            value.update(overrides)
+            value["last_update_ns"] = 1
+            if map_name == "sched":
+                value["comm"] = "worker"
+            return value
+
+        def entry(pid: int, cpu: int, value: dict) -> dict:
+            return {"formatted": {"key": {"pid": pid, "cpu": cpu}, "value": value}}
+
+        with patch("src.backend.live_reader.dump_map") as dump_map:
+            dump_map.side_effect = [
+                [entry(101, 0, complete_value("sched", {"ctx_switches": 7}))],
+                [entry(102, 0, complete_value("mem", {"kmalloc_count": 4}))],
+                [entry(103, 0, complete_value("syscall", {"futex_count": 3}))],
+                [entry(104, 0, complete_value("lock", {"mutex_contentions": 2}))],
+            ]
+            rows = {row["pid"]: row for row in _read_fixture_processes()}
+
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(rows[101]["kmalloc_count"], 0)
+        self.assertEqual(rows[101]["futex_count"], 0)
+        self.assertEqual(rows[102]["kmalloc_count"], 4)
+        self.assertEqual(rows[102]["futex_count"], 0)
+        self.assertEqual(rows[103]["futex_count"], 3)
+        self.assertEqual(rows[103]["kmalloc_count"], 0)
+        self.assertEqual(rows[104]["futex_count"], 0)
+        self.assertEqual(rows[104]["kmalloc_count"], 0)
+        self.assertTrue(all(row["missing_metrics"] == [] for row in rows.values()))
+
+    def test_reader_zero_and_positive_denominator_average_semantics(self) -> None:
+        def value(map_name: str, overrides: dict) -> dict:
+            fields = live_reader.MAP_VALUE_FIELDS[map_name] - {"last_update_ns", "comm"}
+            result = {field: 0 for field in fields}
+            result.update(overrides)
+            result["last_update_ns"] = 1
+            if map_name == "sched":
+                result["comm"] = "worker"
+            return result
+
+        entry = lambda map_name, values: [{"formatted": {
+            "key": {"pid": 111, "cpu": 0}, "value": value(map_name, values),
+        }}]
+        with patch("src.backend.live_reader.dump_map") as dump_map:
+            dump_map.side_effect = [
+                entry("sched", {"stall_ns": 100, "latency_count": 0,
+                                "runq_ratio_sum": 99, "runq_ratio_count": 0}),
+                [],
+                entry("syscall", {"total_count": 0, "latency_sum_ns": 90,
+                                  "futex_count": 0, "futex_latency_sum_ns": 80,
+                                  "epoll_count": 0, "epoll_latency_sum_ns": 70}),
+                entry("lock", {"mutex_contentions": 0, "mutex_wait_sum_ns": 60,
+                               "rwsem_read_contentions": 0,
+                               "rwsem_read_wait_sum_ns": 50}),
+            ]
+            zero_row = _read_fixture_processes()[0]
+
+        for feature in (
+            "avg_runq_ratio", "avg_stall_ns", "avg_syscall_latency_ns",
+            "avg_futex_latency_ns", "avg_epoll_latency_ns",
+            "avg_mutex_wait_ns", "avg_rwsem_read_wait_ns",
+        ):
+            self.assertEqual(zero_row[feature], 0)
+            self.assertNotIn(feature, zero_row["missing_metrics"])
+
+        with patch("src.backend.live_reader.dump_map") as dump_map:
+            dump_map.side_effect = [
+                entry("sched", {"runq_ratio_sum": 17, "runq_ratio_count": 2,
+                                "stall_ns": 101, "latency_count": 2}),
+                [],
+                entry("syscall", {"total_count": 2, "latency_sum_ns": 101,
+                                  "futex_count": 2, "futex_latency_sum_ns": 99,
+                                  "epoll_count": 2, "epoll_latency_sum_ns": 79}),
+                entry("lock", {"mutex_contentions": 2, "mutex_wait_sum_ns": 103,
+                               "rwsem_read_contentions": 2,
+                               "rwsem_read_wait_sum_ns": 105}),
+            ]
+            positive_row = _read_fixture_processes()[0]
+
+        expected = {
+            "avg_runq_ratio": 8, "avg_stall_ns": 50,
+            "avg_syscall_latency_ns": 50, "avg_futex_latency_ns": 49,
+            "avg_epoll_latency_ns": 39, "avg_mutex_wait_ns": 51,
+            "avg_rwsem_read_wait_ns": 52,
+        }
+        for feature, result in expected.items():
+            self.assertEqual(positive_row[feature], result)
+
+    def test_reader_rejects_malformed_or_incompatible_map_entries(self) -> None:
+        malformed_cases = [
+            [{"formatted": {"key": {"pid": 1, "cpu": 0}, "value": "bad"}}],
+            [{"formatted": {"key": {"pid": 1, "cpu": 0}, "value": {
+                "ctx_switches": 1.5,
+            }}}],
+            [{"formatted": {"key": {"pid": 1, "cpu": 0}, "value": {
+                "future_counter": 9,
+            }}}],
+        ]
+        for malformed in malformed_cases:
+            with self.subTest(malformed=malformed), patch(
+                "src.backend.live_reader.dump_map",
+                side_effect=[malformed, [], [], []],
+            ):
+                with self.assertRaises(ValueError):
+                    _read_fixture_processes()
+
+        with self.assertRaisesRegex(ValueError, "exactly sched, mem, syscall, and lock"):
+            live_reader._validate_map_snapshot(
+                {"sched": [], "mem": [], "syscall": []}, {}
+            )
+
+    def test_reader_rejects_recognized_but_incomplete_entry_before_zero_filling(self) -> None:
+        incomplete = [{"formatted": {
+            "key": {"pid": 99, "cpu": 0}, "value": {"ctx_switches": 1},
+        }}]
+        # The target key is absent from sched, but that snapshot contains an
+        # incompatible entry. It must invalidate the snapshot before defaults.
+        complete_mem = {
+            field: 0 for field in live_reader.MAP_VALUE_FIELDS["mem"]
+            if field != "last_update_ns"
+        }
+        complete_mem["last_update_ns"] = 1
+        with patch("src.backend.live_reader.dump_map") as dump_map:
+            dump_map.side_effect = [
+                incomplete,
+                [{"formatted": {"key": {"pid": 100, "cpu": 0}, "value": complete_mem}}],
+                [], [],
+            ]
+            with self.assertRaisesRegex(ValueError, "incomplete 'sched' map value"):
+                live_reader.read_live_processes()
+
+    def test_reader_requires_verifiable_identity_and_abi_for_empty_maps(self) -> None:
+        sched_value = {
+            field: ("worker" if field == "comm" else (1 if field == "last_update_ns" else 0))
+            for field in live_reader.MAP_VALUE_FIELDS["sched"]
+        }
+        metadata = {name: _map_metadata_fixture(name) for name in live_reader.MAPS}
+        with patch("src.backend.live_reader.get_map_metadata", side_effect=lambda name: metadata[name]), \
+             patch("src.backend.live_reader.dump_map", side_effect=[
+                 [{"formatted": {"key": {"pid": 109, "cpu": 0}, "value": sched_value}}],
+                 [], [], [],
+             ]):
+            row = live_reader.read_live_processes()[0]
+            self.assertEqual(row["kmalloc_count"], 0)
+            self.assertEqual(row["futex_count"], 0)
+
+        invalid_metadata = {name: _map_metadata_fixture(name) for name in live_reader.MAPS}
+        invalid_metadata["sched"] = {"name": "sched_map", "type": "hash"}
+        with patch("src.backend.live_reader.get_map_metadata", side_effect=lambda name: invalid_metadata[name]), \
+             patch("src.backend.live_reader.dump_map", return_value=[]):
+            with self.assertRaisesRegex(ValueError, "lacks verifiable ABI identity"):
+                _read_fixture_processes()
+
+    def test_raw_btf_resolves_the_map_associated_value_struct_for_all_maps(self) -> None:
+        for name in live_reader.MAPS:
+            with self.subTest(map_name=name):
+                schema = live_reader._parse_raw_btf_schema(_raw_btf_fixture(name), name)
+                self.assertEqual(schema["map_symbol"], live_reader.MAPS[name])
+                self.assertEqual(schema["key_struct"], "agg_key")
+                self.assertEqual(set(schema["key_fields"]), {"pid", "cpu"})
+                expected_name, expected_size = live_reader.MAP_VALUE_STRUCTS[name]
+                self.assertEqual(schema["value_struct"], expected_name)
+                self.assertEqual(schema["value_struct_size"], expected_size)
+                self.assertEqual(set(schema["value_fields"]), live_reader.MAP_VALUE_FIELDS[name])
+
+    def test_raw_btf_follows_typedefs_and_qualifiers_on_the_value_member(self) -> None:
+        raw_btf = _raw_btf_fixture("sched").replace(
+            "[5] PTR '(anon)' type_id=3",
+            "[10] CONST '(anon)' type_id=3\n"
+            "[11] TYPEDEF 'sched_value_alias' type_id=10\n"
+            "[5] PTR '(anon)' type_id=11",
+        )
+        schema = live_reader._parse_raw_btf_schema(raw_btf, "sched")
+        self.assertEqual(schema["value_struct"], "sched_value")
+        self.assertEqual(schema["value_struct_size"], 104)
+
+    def test_raw_btf_accepts_trailing_commas_on_integer_tokens(self) -> None:
+        raw_btf = _raw_btf_fixture("sched")
+        raw_btf = raw_btf.replace(
+            "[2] STRUCT 'agg_key' size=8 vlen=2",
+            "[2] STRUCT 'agg_key' size=8, vlen=2,",
+        ).replace(
+            "[3] STRUCT 'sched_value' size=104 vlen=12",
+            "[3] STRUCT 'sched_value' size=104, vlen=12,",
+        ).replace(
+            "[5] PTR '(anon)' type_id=3",
+            "[5] PTR '(anon)' type_id=3,",
+        )
+
+        schema = live_reader._parse_raw_btf_schema(raw_btf, "sched")
+
+        self.assertEqual(schema["value_struct"], "sched_value")
+        self.assertEqual(schema["value_struct_size"], 104)
+        self.assertEqual(live_reader._parse_btf_integer("23,", "size"), 23)
+
+    def test_raw_btf_integer_parser_rejects_malformed_punctuation(self) -> None:
+        for token in ("23,,", "23,x", ",23", "-23", ""):
+            with self.subTest(token=token):
+                with self.assertRaisesRegex(ValueError, "invalid BTF size"):
+                    live_reader._parse_btf_integer(token, "size")
+
+        malformed_btf = _raw_btf_fixture("sched").replace(
+            "size=104", "size=23,,", 1,
+        )
+        with self.assertRaisesRegex(ValueError, "invalid BTF size"):
+            live_reader._parse_raw_btf_schema(malformed_btf, "sched")
+
+    def test_map_metadata_consumes_btf_id_and_text_dump_without_value_type_id(self) -> None:
+        self._metadata_patcher.stop()
+        for name in live_reader.MAPS:
+            with self.subTest(map_name=name):
+                map_payload = {
+                    "id": 19,
+                    "type": "hash",
+                    "name": live_reader.MAPS[name],
+                    "flags": 0,
+                    "bytes_key": live_reader.MAP_ABI[name][0],
+                    "bytes_value": live_reader.MAP_ABI[name][1],
+                    "max_entries": 65536,
+                    "btf_id": 207,
+                }
+                responses = [
+                    SimpleNamespace(returncode=0, stdout=json.dumps(map_payload), stderr=""),
+                    SimpleNamespace(returncode=0, stdout=_raw_btf_fixture(name), stderr=""),
+                ]
+                with patch("src.backend.live_reader.subprocess.run", side_effect=responses) as run:
+                    metadata = live_reader.get_map_metadata(name)
+                self.assertEqual(metadata["btf_id"], 207)
+                self.assertEqual(metadata["value_struct"], live_reader.MAP_VALUE_STRUCTS[name][0])
+                self.assertEqual(run.call_args_list[1].args[0][-6:], [
+                    "btf", "dump", "id", "207", "format", "raw",
+                ])
+                self.assertNotIn("-j", run.call_args_list[1].args[0])
+                self.assertNotIn("btf_value_type_id", map_payload)
+
+    def test_btf_schema_rejects_missing_metadata_malformed_and_incompatible_layouts(self) -> None:
+        self._metadata_patcher.stop()
+        no_btf_id = {
+            "id": 19, "type": "hash", "name": "sched_map",
+            "bytes_key": 8, "bytes_value": 104,
+        }
+        with patch("src.backend.live_reader.subprocess.run", return_value=SimpleNamespace(
+            returncode=0, stdout=json.dumps(no_btf_id), stderr=""
+        )):
+            with self.assertRaisesRegex(ValueError, "no verifiable BTF ID"):
+                live_reader.get_map_metadata("sched")
+
+        malformed_fixtures = [
+            "not a bpftool BTF dump\n",
+            _raw_btf_fixture("sched", linked_value_struct="mem_value"),
+            _raw_btf_fixture("sched", value_size=96),
+            _raw_btf_fixture(
+                "sched",
+                value_fields=sorted(live_reader.MAP_VALUE_FIELDS["sched"] - {"stall_ns"}),
+            ),
+            _raw_btf_fixture(
+                "sched",
+                value_fields=sorted(live_reader.MAP_VALUE_FIELDS["sched"] | {"extra_counter"}),
+            ),
+        ]
+        for raw_btf in malformed_fixtures:
+            with self.subTest(raw_btf=raw_btf[:100]):
+                with self.assertRaises(ValueError):
+                    live_reader._parse_raw_btf_schema(raw_btf, "sched")
+
+    def test_metadata_validation_rejects_wrong_map_value_size_and_struct(self) -> None:
+        for field, invalid_value in (
+            ("name", "other_map"),
+            ("type", "array"),
+            ("bytes_key", 16),
+            ("bytes_value", 64),
+            ("btf_id", 0),
+            ("map_symbol", "other_map"),
+            ("key_struct", "wrong_key"),
+            ("value_struct", "mem_value"),
+            ("value_struct_size", 64),
+            ("value_fields", sorted(live_reader.MAP_VALUE_FIELDS["sched"] - {"stall_ns"})),
+            ("value_fields", sorted(live_reader.MAP_VALUE_FIELDS["sched"] | {"extra_counter"})),
+        ):
+            metadata = {name: _map_metadata_fixture(name) for name in live_reader.MAPS}
+            metadata["sched"][field] = invalid_value
+            with self.subTest(field=field, value=invalid_value):
+                with self.assertRaisesRegex(ValueError, "pinned identity or ABI is incompatible"):
+                    live_reader._validate_map_metadata(metadata)
+
+    def test_reader_propagates_failed_map_reads_without_zero_defaults(self) -> None:
+        with patch("src.backend.live_reader.dump_map") as dump_map:
+            dump_map.side_effect = [[], [], RuntimeError("map read failed")]
+            with self.assertRaisesRegex(RuntimeError, "map read failed"):
+                _read_fixture_processes()
+
+    def test_model_feature_schemas_keep_the_saved_exact_orders(self) -> None:
+        champion_columns = json.loads(
+            backend.CHAMPION_FEATURES_PATH.read_text(encoding="utf-8")
+        )
+        attribution_columns = json.loads(
+            backend.ATTRIBUTION_FEATURES_PATH.read_text(encoding="utf-8")
+        )
+        self.assertEqual(len(champion_columns), 33)
+        self.assertEqual(champion_columns, backend.CHAMPION_FEATURE_COLS)
+        self.assertEqual(list(backend.champion_model.feature_names_in_), champion_columns)
+        self.assertEqual(len(attribution_columns), 33)
+        self.assertEqual(backend.attributor.feature_columns, attribution_columns)
 
     def test_current_artifact_bundle_loads(self) -> None:
         self.assertEqual(len(backend.CHAMPION_FEATURE_COLS), 33)

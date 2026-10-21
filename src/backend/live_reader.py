@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import time
 import shutil
@@ -55,6 +56,53 @@ METRIC_SOURCE_KEYS = {
     },
 }
 
+# Fields present in each current map value. These are used to reject decoded
+# values from an unexpected map ABI; missing fields in a present value remain
+# missing rather than being silently filled with zero.
+MAP_VALUE_FIELDS = {
+    "sched": {
+        "ctx_switches", "voluntary_switches", "involuntary_switches",
+        "cpu_migrations", "total_runtime_ns", "stall_ns", "max_stall_ns",
+        "latency_count", "runq_ratio_sum", "runq_ratio_count",
+        "last_update_ns", "comm",
+    },
+    "mem": {
+        "minor_faults", "major_faults", "kmalloc_count", "kfree_count",
+        "total_alloc_bytes", "last_update_ns",
+    },
+    "syscall": {
+        "total_count", "latency_sum_ns", "latency_max_ns", "read_count",
+        "write_count", "read_bytes", "write_bytes", "mmap_count",
+        "futex_count", "futex_latency_sum_ns", "epoll_count",
+        "epoll_latency_sum_ns", "poll_count", "error_count",
+        "last_update_ns",
+    },
+    "lock": {
+        "mutex_contentions", "mutex_wait_sum_ns", "mutex_wait_max_ns",
+        "rwsem_read_contentions", "rwsem_read_wait_sum_ns",
+        "rwsem_write_contentions", "last_update_ns",
+    },
+}
+
+# Sizes from struct agg_key and the four value structs in
+# src/realtime/realtime_monitor.bpf.c. bpftool's map dump omits ABI metadata
+# when a hash map is empty, so map show must verify the pinned object's name,
+# type, key size, and value size before an empty snapshot can be trusted.
+MAP_ABI = {
+    "sched": (8, 104),
+    "mem": (8, 48),
+    "syscall": (8, 120),
+    "lock": (8, 56),
+}
+
+MAP_VALUE_STRUCTS = {
+    "sched": ("sched_value", 104),
+    "mem": ("mem_value", 48),
+    "syscall": ("syscall_value", 120),
+    "lock": ("lock_value", 56),
+}
+KEY_STRUCT = ("agg_key", 8, {"pid", "cpu"})
+
 DERIVED_METRIC_SOURCE_KEYS = {
     "avg_runq_ratio": ("runq_ratio_sum", "runq_ratio_count"),
     "avg_stall_ns": ("stall_ns", "latency_count"),
@@ -103,7 +151,7 @@ def _as_int(value):
                 return int(value, 16)
             except ValueError:
                 return int(value, 10)
-    return int(value)
+    raise ValueError("map integer must be an integer or integer-formatted string")
 
 
 def _decode_key(key):
@@ -131,9 +179,9 @@ def _add_max(row, value, source, destination=None):
 
 
 def _average(row, numerator, denominator, output):
-    if numerator in row and denominator in row and row[denominator] > 0:
+    if numerator in row and denominator in row:
         # Match the training reader's uint64 integer-division feature values.
-        row[output] = row[numerator] // row[denominator]
+        row[output] = row[numerator] // row[denominator] if row[denominator] > 0 else 0
         row["_observed_metrics"].add(output)
 
 
@@ -163,24 +211,297 @@ def dump_map(name):
     return payload
 
 
+def _parse_btf_integer(token, field):
+    """Parse a decimal BTF attribute, allowing its trailing separator comma."""
+    if not isinstance(token, str):
+        raise ValueError(f"invalid BTF {field}: expected an integer token")
+    match = re.fullmatch(r"([0-9]+),?", token)
+    if match is None:
+        raise ValueError(f"invalid BTF {field}: {token!r}")
+    return int(match.group(1), 10)
+
+
+def _parse_raw_btf_schema(raw_btf, map_name):
+    """Resolve a map's key/value structs from bpftool's raw-text BTF dump."""
+    if map_name not in MAPS or not isinstance(raw_btf, str):
+        raise ValueError("invalid map name or raw BTF payload")
+
+    header_re = re.compile(r"^\[(\d+)\]\s+(\S+)\s+'([^']*)'(.*)$")
+    attr_re = re.compile(r"([a-zA-Z_]+)=([^\s]+)")
+    member_re = re.compile(r"^\s+'([^']+)'\s+type_id=(\d+)\b")
+    types = {}
+    current = None
+    for line in raw_btf.splitlines():
+        header = header_re.match(line)
+        if header:
+            type_id = int(header.group(1))
+            if type_id in types:
+                raise ValueError(f"duplicate BTF type id {type_id}")
+            kind, type_name, tail = header.group(2), header.group(3), header.group(4)
+            item = {
+                "id": type_id,
+                "kind": kind,
+                "name": type_name,
+                "attrs": dict(attr_re.findall(tail)),
+                "members": [],
+                "body": [],
+            }
+            if "size" in item["attrs"]:
+                item["size"] = _parse_btf_integer(item["attrs"]["size"], "size")
+            if "vlen" in item["attrs"]:
+                item["vlen"] = _parse_btf_integer(item["attrs"]["vlen"], "vlen")
+            types[type_id] = item
+            current = item
+            continue
+        if current is None:
+            if line.strip():
+                raise ValueError("malformed raw BTF output before first type")
+            continue
+        current["body"].append(line)
+        member = member_re.match(line)
+        if member:
+            current["members"].append({"name": member.group(1), "type_id": int(member.group(2))})
+
+    if not types:
+        raise ValueError("raw BTF output contains no types")
+    for item in types.values():
+        if item["kind"] in {"STRUCT", "UNION"}:
+            if item.get("vlen") != len(item["members"]):
+                raise ValueError(f"malformed BTF members for {item['kind']} {item['name']!r}")
+
+    def type_ref(type_id):
+        seen = set()
+        while True:
+            if type_id in seen:
+                raise ValueError("cyclic BTF type reference")
+            seen.add(type_id)
+            item = types.get(type_id)
+            if item is None:
+                raise ValueError(f"BTF references missing type id {type_id}")
+            if item["kind"] in {
+                "TYPEDEF", "CONST", "VOLATILE", "RESTRICT", "TYPE_TAG", "PTR"
+            }:
+                type_text = " ".join(item["body"])
+                next_id = item["attrs"].get("type_id")
+                if next_id is None:
+                    match = re.search(r"type_id=(\d+)", type_text)
+                    next_id = match.group(1) if match else None
+                if next_id is None:
+                    raise ValueError(f"BTF {item['kind']} type {type_id} lacks type_id")
+                type_id = _parse_btf_integer(next_id, "type_id")
+                continue
+            return item
+
+    map_symbol = MAPS[map_name]
+    variables = [item for item in types.values()
+                 if item["kind"] == "VAR" and item["name"] == map_symbol]
+    if len(variables) != 1:
+        raise ValueError(f"BTF does not uniquely identify map symbol {map_symbol!r}")
+    variable = variables[0]
+    map_sections = [item for item in types.values()
+                    if item["kind"] == "DATASEC" and item["name"] == ".maps"]
+    if len(map_sections) != 1 or not any(
+        re.search(rf"\btype_id={variable['id']}\b", line)
+        for line in map_sections[0]["body"]
+    ):
+        raise ValueError(f"BTF map symbol {map_symbol!r} is not uniquely in .maps")
+
+    map_decl = type_ref(_parse_btf_integer(variable["attrs"].get("type_id", "0"), "type_id"))
+    if map_decl["kind"] != "STRUCT":
+        raise ValueError(f"BTF map symbol {map_symbol!r} is not a map struct")
+    value_members = [member for member in map_decl["members"] if member["name"] == "value"]
+    key_members = [member for member in map_decl["members"] if member["name"] == "key"]
+    if len(value_members) != 1 or len(key_members) != 1:
+        raise ValueError(f"BTF map declaration {map_symbol!r} lacks unique key/value members")
+    value_type = type_ref(value_members[0]["type_id"])
+    key_type = type_ref(key_members[0]["type_id"])
+    expected_value_name, expected_value_size = MAP_VALUE_STRUCTS[map_name]
+    if value_type["kind"] != "STRUCT" or value_type["name"] != expected_value_name:
+        raise ValueError(
+            f"BTF map {map_symbol!r} resolves to unexpected value struct "
+            f"{value_type['name']!r}"
+        )
+    if value_type.get("size") != expected_value_size:
+        raise ValueError(f"BTF value struct {expected_value_name!r} has incompatible size")
+    expected_value_fields = MAP_VALUE_FIELDS[map_name]
+    value_fields = [member["name"] for member in value_type["members"]]
+    if len(value_fields) != len(expected_value_fields) or set(value_fields) != expected_value_fields:
+        raise ValueError(f"BTF value struct {expected_value_name!r} has incompatible members")
+    if (key_type["kind"] != "STRUCT" or key_type["name"] != KEY_STRUCT[0]
+            or key_type.get("size") != KEY_STRUCT[1]
+            or set(member["name"] for member in key_type["members"]) != KEY_STRUCT[2]
+            or len(key_type["members"]) != len(KEY_STRUCT[2])):
+        raise ValueError(f"BTF map declaration {map_symbol!r} has incompatible key struct")
+    return {
+        "map_symbol": map_symbol,
+        "key_struct": key_type["name"],
+        "key_fields": [member["name"] for member in key_type["members"]],
+        "value_struct": value_type["name"],
+        "value_struct_size": value_type["size"],
+        "value_fields": value_fields,
+    }
+
+
+def get_map_metadata(name):
+    if name not in MAPS:
+        raise ValueError(f"Unsupported pinned map name: {name!r}")
+    path = get_pin_dir() / MAPS[name]
+    bpftool = shutil.which("bpftool") or "/usr/sbin/bpftool"
+    result = subprocess.run(
+        ["sudo", "-n", bpftool, "-j", "map", "show", "pinned", str(path)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(
+            f"bpftool metadata read failed for map {name!r} at {path} "
+            f"(exit={result.returncode}): {detail}"
+        )
+    payload = json.loads(result.stdout)
+    if isinstance(payload, list) and len(payload) == 1:
+        payload = payload[0]
+    if not isinstance(payload, dict):
+        raise ValueError(f"bpftool returned invalid metadata for map {name!r}")
+    btf_id = payload.get("btf_id")
+    try:
+        btf_id = _as_int(btf_id)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"map {name!r} has no verifiable BTF ID") from exc
+    if btf_id <= 0:
+        raise ValueError(f"map {name!r} has no verifiable BTF ID")
+    btf_result = subprocess.run(
+        ["sudo", "-n", bpftool, "btf", "dump", "id", str(btf_id), "format", "raw"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if btf_result.returncode != 0:
+        detail = btf_result.stderr.strip() or btf_result.stdout.strip()
+        raise RuntimeError(f"bpftool BTF read failed for map {name!r}: {detail}")
+    payload["btf_id"] = btf_id
+    payload.update(_parse_raw_btf_schema(btf_result.stdout, name))
+    return payload
+
+
 def decode(entry):
     if not isinstance(entry, dict):
-        return None
+        raise ValueError("malformed bpftool map entry: expected an object")
     try:
         formatted = entry.get("formatted", entry)
         if not isinstance(formatted, dict):
-            return None
+            raise ValueError("malformed bpftool map entry: formatted value must be an object")
         key = _decode_key(formatted.get("key", entry.get("key")))
         value = formatted.get("value", entry.get("value"))
         if not isinstance(value, dict):
-            return None
+            raise ValueError("malformed bpftool map entry: value must be an object")
         return key, value
-    except (KeyError, TypeError, ValueError, OverflowError):
-        return None
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"malformed bpftool map entry: {exc}") from exc
+
+
+def _validate_map_metadata(metadata):
+    if not isinstance(metadata, dict) or set(metadata) != set(MAPS):
+        raise ValueError("map metadata must identify exactly sched, mem, syscall, and lock maps")
+    for map_name, info in metadata.items():
+        if not isinstance(info, dict):
+            raise ValueError(f"map {map_name!r} metadata must be an object")
+        key_size, value_size = MAP_ABI[map_name]
+        actual_name = info.get("name")
+        actual_type = info.get("type")
+        actual_key_size = info.get("bytes_key", info.get("key_size"))
+        actual_value_size = info.get("bytes_value", info.get("value_size"))
+        actual_fields = info.get("value_fields")
+        actual_btf_id = info.get("btf_id")
+        actual_key_fields = info.get("key_fields")
+        expected_struct, expected_struct_size = MAP_VALUE_STRUCTS[map_name]
+        try:
+            actual_key_size = _as_int(actual_key_size)
+            actual_value_size = _as_int(actual_value_size)
+            actual_btf_id = _as_int(actual_btf_id)
+            actual_struct_size = _as_int(info.get("value_struct_size"))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"map {map_name!r} metadata lacks verifiable ABI identity") from exc
+        if (actual_name != MAPS[map_name] or str(actual_type).lower() != "hash"
+                or (actual_key_size, actual_value_size) != (key_size, value_size)
+                or actual_btf_id <= 0
+                or info.get("map_symbol") != MAPS[map_name]
+                or info.get("key_struct") != KEY_STRUCT[0]
+                or not isinstance(actual_key_fields, list)
+                or any(not isinstance(field, str) for field in actual_key_fields)
+                or set(actual_key_fields) != KEY_STRUCT[2]
+                or len(actual_key_fields) != len(KEY_STRUCT[2])
+                or info.get("value_struct") != expected_struct
+                or actual_struct_size != expected_struct_size
+                or not isinstance(actual_fields, list)
+                or len(actual_fields) != len(MAP_VALUE_FIELDS[map_name])
+                or any(not isinstance(field, str) for field in actual_fields)
+                or set(actual_fields) != MAP_VALUE_FIELDS[map_name]):
+            raise ValueError(f"map {map_name!r} pinned identity or ABI is incompatible")
+
+
+def _validate_map_snapshot(snapshots, metadata):
+    if not isinstance(snapshots, dict) or set(snapshots) != set(MAPS):
+        raise ValueError("map snapshot must contain exactly sched, mem, syscall, and lock maps")
+    _validate_map_metadata(metadata)
+    for map_name, entries in snapshots.items():
+        if not isinstance(entries, list):
+            raise ValueError(f"map {map_name!r} snapshot must be a list")
+        allowed_fields = MAP_VALUE_FIELDS[map_name]
+        if not entries:
+            # The BTF member names plus map identity and sizes above verify
+            # empty map ABI before its absent keys authorize zero defaults.
+            continue
+        for entry in entries:
+            _key, value = decode(entry)
+            missing = allowed_fields - set(value)
+            if missing:
+                raise ValueError(
+                    f"incomplete {map_name!r} map value; missing field(s): "
+                    + ", ".join(sorted(missing))
+                )
+            unsupported = set(value) - allowed_fields
+            if unsupported:
+                raise ValueError(
+                    f"unsupported {map_name!r} map value field(s): "
+                    + ", ".join(sorted(unsupported))
+                )
+            for field, raw_value in value.items():
+                if field == "last_update_ns":
+                    # Timestamp parse failures have their own explicit invalid
+                    # status below; they do not invalidate metric structure.
+                    if isinstance(raw_value, bool) or not isinstance(raw_value, (int, str)):
+                        raise ValueError(f"malformed {map_name!r} map timestamp field")
+                    continue
+                if field == "comm":
+                    if not isinstance(raw_value, (str, list)):
+                        raise ValueError("malformed sched map comm field")
+                    if isinstance(raw_value, list):
+                        try:
+                            for byte in raw_value:
+                                parsed = _as_int(byte)
+                                if not 0 <= parsed <= 255:
+                                    raise ValueError
+                        except (TypeError, ValueError, OverflowError) as exc:
+                            raise ValueError("malformed sched map comm byte array") from exc
+                    continue
+                try:
+                    parsed_value = _as_int(raw_value)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise ValueError(
+                        f"malformed {map_name!r} map field {field!r}"
+                    ) from exc
+                if parsed_value < 0:
+                    raise ValueError(f"negative unsigned {map_name!r} map field {field!r}")
 
 
 def read_live_processes():
+    metadata = {name: get_map_metadata(name) for name in MAPS}
     snapshots = {name: dump_map(name) for name in MAPS}
+    _validate_map_snapshot(snapshots, metadata)
     processes = defaultdict(lambda: {
         "pid": 0, "cpu": 0, "comm": "",
         "_observed_metrics": set(),
@@ -203,6 +524,7 @@ def read_live_processes():
             row = processes[(pid, cpu)]
             row["pid"] = pid
             row["cpu"] = cpu
+            row.setdefault("_observed_map_families", set()).add(map_name)
             row["_observed_source_keys"].update(value)
             for metric, source_keys in METRIC_SOURCE_KEYS.get(map_name, {}).items():
                 if all(source_key in value for source_key in source_keys):
@@ -266,7 +588,28 @@ def read_live_processes():
 
     output = []
     for row in processes.values():
+        # The baseline training reader built a complete row from the union of
+        # map keys and treated a valid absent map-family entry as zero. Keep
+        # missing fields in a present map value distinct: only absent families
+        # receive these defaults.
+        for map_name, fields in MAP_VALUE_FIELDS.items():
+            if map_name in row["_observed_map_families"]:
+                continue
+            for metric in METRIC_SOURCE_KEYS[map_name]:
+                row.setdefault(metric, 0)
+                row["_observed_metrics"].add(metric)
+            derived_fields = {
+                field
+                for sources in DERIVED_METRIC_SOURCE_KEYS.values()
+                for field in sources
+                if field in fields
+            }
+            for field in derived_fields:
+                row.setdefault(field, 0)
+                row["_observed_source_keys"].add(field)
+
         for numerator, denominator, average in (
+            ("runq_ratio_sum", "runq_ratio_count", "avg_runq_ratio"),
             ("stall_ns", "latency_count", "avg_stall_ns"),
             ("latency_sum_ns", "syscall_count", "avg_syscall_latency_ns"),
             ("futex_latency_sum_ns", "futex_count", "avg_futex_latency_ns"),
@@ -277,14 +620,6 @@ def read_live_processes():
             required_sources = DERIVED_METRIC_SOURCE_KEYS[average]
             if set(required_sources).issubset(row["_observed_source_keys"]):
                 _average(row, numerator, denominator, average)
-
-        # The v7 training reader used unsigned integer division for this
-        # feature; keep its floor-mean semantics and require at least one sample.
-        if (set(DERIVED_METRIC_SOURCE_KEYS["avg_runq_ratio"]).issubset(
-                row["_observed_source_keys"]
-        ) and row.get("runq_ratio_count", 0) > 0):
-            row["avg_runq_ratio"] = row["runq_ratio_sum"] // row["runq_ratio_count"]
-            row["_observed_metrics"].add("avg_runq_ratio")
 
         row["session_label"] = "live_ebpf"
         row["missing_metrics"] = sorted(ATTRIBUTION_FEATURES - row["_observed_metrics"])
@@ -316,6 +651,7 @@ def read_live_processes():
             row.pop(field, None)
         row.pop("_observed_metrics", None)
         row.pop("_observed_source_keys", None)
+        row.pop("_observed_map_families", None)
         row.pop("_last_update_ns", None)
         row.pop("_timestamp_missing", None)
         row.pop("_timestamp_invalid", None)
