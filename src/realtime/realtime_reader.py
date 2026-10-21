@@ -16,7 +16,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from .config import RealtimeConfig, load_config
-from .utils import run_bpftool_clear, run_bpftool_dump, load_feature_columns, load_label_thresholds
+from .utils import (
+    AtomicMapConsumeError,
+    consume_map_snapshot,
+    run_bpftool_dump,
+    load_feature_columns,
+    load_label_thresholds,
+)
 
 # Keeps the legacy multiclass labels available for older classifier artifacts.
 #
@@ -109,6 +115,8 @@ class RealtimeReader:
         self.debug_enabled = os.getenv("REALTIME_DEBUG", "").lower() in {"1", "true", "yes", "on"}
         self.collect_timings = collect_timings
         self.last_stage_timings_ns: dict[str, int | None] = {}
+        self._pending_consumed_snapshot: dict[str, list[dict[str, Any]]] = {}
+        self._defer_consumed_commit = False
 
         if not self.config.model_path or not os.path.exists(self.config.model_path):
             raise RuntimeError(f"Missing champion model for realtime inference: {self.config.model_path}")
@@ -196,14 +204,48 @@ class RealtimeReader:
             "lock": run_bpftool_dump(self.config.lock_map_path),
         }
 
-    def _clear_snapshot_maps(self, snapshot: dict[str, Any]) -> None:
-        map_entries = [
-            (self.config.sched_map_path, snapshot["sched"]),
-            (self.config.mem_map_path, snapshot["mem"]),
-            (self.config.syscall_map_path, snapshot["syscall"]),
-            (self.config.lock_map_path, snapshot["lock"]),
-        ]
-        run_bpftool_clear(map_entries)
+    def _consume_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        from src.backend.live_reader import (
+            MAPS,
+            _validate_map_metadata,
+            get_map_metadata,
+        )
+
+        map_paths = {
+            "sched": self.config.sched_map_path,
+            "mem": self.config.mem_map_path,
+            "syscall": self.config.syscall_map_path,
+            "lock": self.config.lock_map_path,
+        }
+        metadata = {
+            name: get_map_metadata(name, map_path=map_paths[name])
+            for name in MAPS
+        }
+        _validate_map_metadata(metadata)
+        try:
+            consumed = consume_map_snapshot([
+                (name, map_paths[name], snapshot[name])
+                for name in MAPS
+            ], expected_metadata=metadata)
+        except AtomicMapConsumeError as exc:
+            pending = getattr(self, "_pending_consumed_snapshot", {})
+            self._pending_consumed_snapshot = {
+                name: [*pending.get(name, []), *exc.partial_snapshot.get(name, [])]
+                for name in MAPS
+            }
+            raise
+
+        pending = getattr(self, "_pending_consumed_snapshot", {})
+        if pending:
+            consumed = {
+                name: [*pending.get(name, []), *consumed.get(name, [])]
+                for name in MAPS
+            }
+        self._pending_consumed_snapshot = consumed
+        return consumed
+
+    def _commit_consumed_snapshot(self) -> None:
+        self._pending_consumed_snapshot = {}
 
     def _normalize_map_entry(self, entry: Any) -> tuple[dict[str, int], dict[str, Any]]:
         if not isinstance(entry, dict):
@@ -450,7 +492,7 @@ class RealtimeReader:
 
         try:
             snapshot = self._read_snapshot()
-            self._clear_snapshot_maps(snapshot)
+            snapshot = self._consume_snapshot(snapshot)
         finally:
             if self.collect_timings:
                 self.last_stage_timings_ns["map_read_ns"] = time.perf_counter_ns() - stage_start_ns
@@ -506,42 +548,50 @@ class RealtimeReader:
         if self.collect_timings:
             self.last_stage_timings_ns["feature_ns"] = time.perf_counter_ns() - stage_start_ns
 
-        return {
+        result = {
             "rows": featured_df,
             "features": feature_frame,
         }
+        if not self._defer_consumed_commit:
+            self._commit_consumed_snapshot()
+        return result
 
     def predict(self) -> dict[str, Any]:
         """Read one snapshot and infer, scaling inputs only for a non-tree classifier."""
-        result = self.read_once()
-        feature_frame = result["features"]
+        self._defer_consumed_commit = True
+        try:
+            result = self.read_once()
+            feature_frame = result["features"]
 
-        if self.collect_timings:
-            stage_start_ns = time.perf_counter_ns()
-        model_input: Any = feature_frame
-        if self.uses_scaled_input and self.scaler is not None:
-            model_input = self.scaler.transform(feature_frame)
+            if self.collect_timings:
+                stage_start_ns = time.perf_counter_ns()
+            model_input: Any = feature_frame
+            if self.uses_scaled_input and self.scaler is not None:
+                model_input = self.scaler.transform(feature_frame)
 
-        probabilities = self.model.predict_proba(model_input) if hasattr(self.model, "predict_proba") else None
-        if self.decision_probability_threshold is not None and probabilities is not None:
-            classes = list(self.model.classes_) if hasattr(self.model, "classes_") else []
-            if set(classes) != {0, 1}:
-                raise RuntimeError(
-                    "A configured binary decision threshold requires model classes {0, 1}; "
-                    f"found {classes}"
-                )
-            positive_class_index = classes.index(1)
-            predictions = (
-                probabilities[:, positive_class_index] >= self.decision_probability_threshold
-            ).astype(int)
-        else:
-            predictions = self.model.predict(model_input)
-        if self.collect_timings:
-            self.last_stage_timings_ns["rf_inference_ns"] = time.perf_counter_ns() - stage_start_ns
+            probabilities = self.model.predict_proba(model_input) if hasattr(self.model, "predict_proba") else None
+            if self.decision_probability_threshold is not None and probabilities is not None:
+                classes = list(self.model.classes_) if hasattr(self.model, "classes_") else []
+                if set(classes) != {0, 1}:
+                    raise RuntimeError(
+                        "A configured binary decision threshold requires model classes {0, 1}; "
+                        f"found {classes}"
+                    )
+                positive_class_index = classes.index(1)
+                predictions = (
+                    probabilities[:, positive_class_index] >= self.decision_probability_threshold
+                ).astype(int)
+            else:
+                predictions = self.model.predict(model_input)
+            if self.collect_timings:
+                self.last_stage_timings_ns["rf_inference_ns"] = time.perf_counter_ns() - stage_start_ns
 
-        result["predictions"] = predictions
-        result["probabilities"] = probabilities
-        return result
+            result["predictions"] = predictions
+            result["probabilities"] = probabilities
+            self._commit_consumed_snapshot()
+            return result
+        finally:
+            self._defer_consumed_commit = False
 
 
 def main() -> None:

@@ -1,11 +1,195 @@
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
+import errno
 import json
 import os
+import struct
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
+
+
+_MAP_VALUE_STRUCTS = {
+    "sched": (struct.Struct("=11Q16s"), (
+        "ctx_switches", "voluntary_switches", "involuntary_switches",
+        "cpu_migrations", "total_runtime_ns", "stall_ns", "max_stall_ns",
+        "latency_count", "runq_ratio_sum", "runq_ratio_count", "last_update_ns",
+        "comm",
+    )),
+    "mem": (struct.Struct("=6Q"), (
+        "minor_faults", "major_faults", "kmalloc_count", "kfree_count",
+        "total_alloc_bytes", "last_update_ns",
+    )),
+    "syscall": (struct.Struct("=15Q"), (
+        "total_count", "latency_sum_ns", "latency_max_ns", "read_count",
+        "write_count", "read_bytes", "write_bytes", "mmap_count", "futex_count",
+        "futex_latency_sum_ns", "epoll_count", "epoll_latency_sum_ns",
+        "poll_count", "error_count", "last_update_ns",
+    )),
+    "lock": (struct.Struct("=7Q"), (
+        "mutex_contentions", "mutex_wait_sum_ns", "mutex_wait_max_ns",
+        "rwsem_read_contentions", "rwsem_read_wait_sum_ns",
+        "rwsem_write_contentions", "last_update_ns",
+    )),
+}
+_MAP_KEY_SIZE = 8
+_BPF_MAP_TYPE_HASH = 1
+
+
+class _BpfMapInfoPrefix(ctypes.Structure):
+    _fields_ = [
+        ("type", ctypes.c_uint32),
+        ("id", ctypes.c_uint32),
+        ("key_size", ctypes.c_uint32),
+        ("value_size", ctypes.c_uint32),
+        ("max_entries", ctypes.c_uint32),
+        ("map_flags", ctypes.c_uint32),
+        ("name", ctypes.c_char * 16),
+    ]
+
+
+class AtomicMapConsumeError(RuntimeError):
+    def __init__(self, message: str, partial_snapshot: dict[str, list[dict[str, Any]]]):
+        super().__init__(message)
+        self.partial_snapshot = partial_snapshot
+
+
+def _load_libbpf(api=None):
+    if api is not None:
+        return api
+    library = ctypes.util.find_library("bpf")
+    if not library:
+        raise RuntimeError("libbpf is required for atomic BPF map consumption")
+    api = ctypes.CDLL(library)
+    api.bpf_obj_get.argtypes = [ctypes.c_char_p]
+    api.bpf_obj_get.restype = ctypes.c_int
+    api.bpf_map_lookup_and_delete_elem.argtypes = [
+        ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
+    ]
+    api.bpf_map_lookup_and_delete_elem.restype = ctypes.c_int
+    api.bpf_obj_get_info_by_fd.argtypes = [
+        ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32),
+    ]
+    api.bpf_obj_get_info_by_fd.restype = ctypes.c_int
+    return api
+
+
+def _raw_map_key(entry: dict[str, Any], map_path: str) -> tuple[bytes, tuple[int, int]]:
+    formatted = entry.get("formatted") if isinstance(entry, dict) else None
+    key = entry.get("key") if isinstance(entry, dict) else None
+    if key is None and isinstance(formatted, dict):
+        key = formatted.get("key")
+    if isinstance(key, dict) and "pid" in key and "cpu" in key:
+        pid, cpu = int(key["pid"]), int(key["cpu"])
+        return struct.pack("=II", pid, cpu), (pid, cpu)
+    if not isinstance(key, list) or len(key) != 8:
+        raise RuntimeError(
+            f"Cannot atomically consume pinned map {map_path!r}: expected an 8-byte raw key"
+        )
+
+    key_bytes = bytearray()
+    for value in key:
+        try:
+            byte = int(value, 0) if isinstance(value, str) else int(value)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Invalid raw key byte in pinned map {map_path!r}") from exc
+        if not 0 <= byte <= 0xFF:
+            raise RuntimeError(f"Invalid raw key byte in pinned map {map_path!r}")
+        key_bytes.append(byte)
+    pid, cpu = struct.unpack("=II", key_bytes)
+    return bytes(key_bytes), (pid, cpu)
+
+
+def _decode_map_value(map_name: str, value: bytes) -> dict[str, Any]:
+    value_struct, fields = _MAP_VALUE_STRUCTS[map_name]
+    if len(value) != value_struct.size:
+        raise RuntimeError(
+            f"Atomic {map_name!r} map lookup returned {len(value)} bytes; "
+            f"expected {value_struct.size}"
+        )
+    decoded = value_struct.unpack(value)
+    result = dict(zip(fields, decoded))
+    if map_name == "sched":
+        result["comm"] = result["comm"].split(b"\0", 1)[0].decode(errors="replace")
+    return result
+
+
+def consume_map_snapshot(
+    map_entries: list[tuple[str, str, list[dict[str, Any]]]],
+    *,
+    expected_metadata: dict[str, dict[str, Any]] | None = None,
+    api=None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Atomically retrieve and delete each captured key's current value.
+
+    The input dump supplies candidate keys only. Value retrieval and deletion
+    are one kernel operation, so updates before it are included and updates
+    after it remain in a newly created entry for the next inference interval.
+    """
+    libbpf = _load_libbpf(api)
+    snapshots: dict[str, list[dict[str, Any]]] = {}
+    for map_name, map_path, entries in map_entries:
+        if map_name not in _MAP_VALUE_STRUCTS:
+            raise ValueError(f"Unsupported inference map {map_name!r}")
+        map_fd = libbpf.bpf_obj_get(os.fsencode(map_path))
+        if map_fd < 0:
+            raise AtomicMapConsumeError(
+                f"Could not open pinned map {map_path!r} (error {-map_fd})",
+                snapshots,
+            )
+        consumed: list[dict[str, Any]] = []
+        try:
+            info = _BpfMapInfoPrefix()
+            info_size = ctypes.c_uint32(ctypes.sizeof(info))
+            info_result = libbpf.bpf_obj_get_info_by_fd(
+                map_fd, ctypes.byref(info), ctypes.byref(info_size),
+            )
+            expected_value_size = _MAP_VALUE_STRUCTS[map_name][0].size
+            expected_id = (expected_metadata or {}).get(map_name, {}).get("id")
+            if (info_result != 0 or info.type != _BPF_MAP_TYPE_HASH
+                    or info.key_size != _MAP_KEY_SIZE
+                    or info.value_size != expected_value_size
+                    or (expected_id is not None and info.id != int(expected_id))):
+                raise AtomicMapConsumeError(
+                    f"Pinned map {map_path!r} changed or has incompatible ABI "
+                    f"before atomic consume (info_result={info_result}, id={info.id}, "
+                    f"type={info.type}, key_size={info.key_size}, value_size={info.value_size})",
+                    snapshots,
+                )
+            value_buffer = ctypes.create_string_buffer(_MAP_VALUE_STRUCTS[map_name][0].size)
+            for entry in entries:
+                try:
+                    key_bytes, key = _raw_map_key(entry, map_path)
+                    key_buffer = ctypes.create_string_buffer(key_bytes, len(key_bytes))
+                    result = libbpf.bpf_map_lookup_and_delete_elem(
+                        map_fd, key_buffer, value_buffer,
+                    )
+                    if result == -errno.ENOENT:
+                        # Exit cleanup or another consumer already retired it.
+                        continue
+                    if result != 0:
+                        raise RuntimeError(f"atomic map operation returned {result}")
+                    consumed.append({
+                        "key": {"pid": key[0], "cpu": key[1]},
+                        "value": _decode_map_value(
+                            map_name,
+                            value_buffer.raw[:_MAP_VALUE_STRUCTS[map_name][0].size],
+                        ),
+                    })
+                except Exception as exc:
+                    snapshots[map_name] = consumed
+                    raise AtomicMapConsumeError(
+                        f"Atomic consume failed for {map_name!r} map {map_path!r} "
+                        f"after {len(consumed)} consumed entries: {exc}",
+                        snapshots,
+                    ) from exc
+        finally:
+            os.close(map_fd)
+        snapshots[map_name] = consumed
+    return snapshots
 
 
 def run_bpftool_dump(map_path: str) -> list[dict[str, Any]]:

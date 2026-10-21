@@ -304,6 +304,213 @@ th {
   margin-top: 18px;
 }
 
+.processHeader {
+  margin-bottom: 14px;
+}
+
+.processCaveat {
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.processControls {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  padding: 14px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.searchField,
+.selectField {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 190px;
+}
+
+.searchField span,
+.selectField span,
+.toggleField {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.searchField input,
+.selectField select {
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: #fff;
+  color: var(--text);
+}
+
+.searchField input:focus-visible,
+.selectField select:focus-visible,
+.toggleField input:focus-visible {
+  outline: 3px solid #72a7c7;
+  outline-offset: 2px;
+}
+
+.toggleField {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  cursor: pointer;
+}
+
+.toggleField input {
+  width: 17px;
+  height: 17px;
+  accent-color: #245a67;
+}
+
+.processSummary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(100px, max-content)) minmax(180px, 1fr);
+  align-items: center;
+  gap: 12px 24px;
+  padding: 14px 0;
+}
+
+.processSummary div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.processSummary span {
+  color: var(--muted-soft);
+  font-size: 0.73rem;
+  text-transform: uppercase;
+}
+
+.processSummary strong {
+  font-size: 1.15rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.processSummary p {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.processTableWrap {
+  max-height: min(68vh, 720px);
+  border-top: 1px solid var(--border);
+}
+
+.processTable {
+  min-width: 1240px;
+}
+
+.processTable thead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel);
+}
+
+.processTable th,
+.processTable td {
+  padding: 12px 10px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.processTable tbody tr:hover {
+  background: #f7fafb;
+}
+
+.processTable .processNameCell {
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 650;
+}
+
+.dataState,
+.classification {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.classification.high {
+  border-color: #a84c35;
+  background: #fff1ec;
+  color: #762a1a;
+}
+
+.classification.notHigh {
+  border-color: #36766d;
+  background: #edf7f4;
+  color: #174f47;
+}
+
+.classification.unavailable,
+.dataState.stale {
+  background: #f1f3f6;
+  color: #525c6b;
+}
+
+.confidenceCell {
+  min-width: 170px;
+}
+
+.confidenceValue {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.confidenceValue strong {
+  min-width: 52px;
+  font-size: 1rem;
+}
+
+.confidenceTrack {
+  width: 82px;
+  height: 8px;
+  overflow: hidden;
+  border: 1px solid #b8c3ca;
+  border-radius: 2px;
+  background: #edf0f1;
+}
+
+.confidenceTrack span {
+  display: block;
+  height: 100%;
+  background: #246477;
+}
+
+.unavailableValue {
+  color: var(--muted);
+}
+
+.selectedConfidence {
+  color: #174f47;
+  font-size: 1.2rem !important;
+}
+
+.emptyProcessState {
+  padding: 24px 0;
+  color: var(--muted);
+}
+
 .loadingState {
   min-height: 100vh;
   display: grid;
@@ -324,6 +531,14 @@ th {
   .diagnosisIdentity,
   .detailGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .processSummary {
+    grid-template-columns: repeat(2, minmax(100px, 1fr));
+  }
+
+  .processSummary p {
+    grid-column: 1 / -1;
   }
 }
 
@@ -349,5 +564,19 @@ th {
   .eventItem {
     grid-template-columns: 1fr;
     gap: 4px;
+  }
+
+  .processControls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .searchField,
+  .selectField {
+    width: 100%;
+  }
+
+  .processSummary {
+    gap: 12px;
   }
 }

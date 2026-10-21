@@ -64,6 +64,14 @@ export interface RealtimeObservation {
   comm: string;
   pid: number;
   cpu: number;
+  metrics: {
+    runtimeMs: number | null;
+    contextSwitches: number | null;
+    cpuMigrations: number | null;
+    allocationBytes: number | null;
+    majorFaults: number | null;
+    minorFaults: number | null;
+  };
   attribution_labels: string[] | null;
   attribution_status: string;
   attribution_prediction: AttributionPrediction | null;

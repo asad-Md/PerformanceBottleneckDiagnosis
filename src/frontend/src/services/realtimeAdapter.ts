@@ -120,6 +120,22 @@ function makeMetrics(process: any): RealtimeFeatureMetric[] {
   ];
 }
 
+function liveProcessMetrics(process: any): RealtimeObservation['metrics'] {
+  const values = process.metrics ?? process;
+  const metric = (name: string, scale = 1): number | null => {
+    const value = values?.[name];
+    return typeof value === 'number' && Number.isFinite(value) ? value / scale : null;
+  };
+  return {
+    runtimeMs: metric('total_runtime_ns', 1e6),
+    contextSwitches: metric('ctx_switches'),
+    cpuMigrations: metric('cpu_migrations'),
+    allocationBytes: metric('total_alloc_bytes'),
+    majorFaults: metric('major_faults'),
+    minorFaults: metric('minor_faults'),
+  };
+}
+
 export function makeSnapshot(data: any): RealtimeSnapshot {
   const processes = Array.isArray(data.processes) ? data.processes : [];
   const models = modelStatuses(data.models);
@@ -177,8 +193,7 @@ export function makeSnapshot(data: any): RealtimeSnapshot {
     missing_metrics: selected.missing_metrics ?? [],
   };
 
-  const observationProcesses = processes
-    .filter((process: any) => process !== selected)
+  const observationProcesses = [...processes]
     .sort((left: any, right: any) => {
       const leftTimestamp = sampleDetails(left).timestampNs;
       const rightTimestamp = sampleDetails(right).timestampNs;
@@ -191,7 +206,8 @@ export function makeSnapshot(data: any): RealtimeSnapshot {
       if (rightTimestamp) return 1;
       return 0;
     })
-    .slice(0, 20);
+    .slice(0, 50);
+
   const observations: RealtimeObservation[] = observationProcesses.map((process: any) => {
     const processSample = sampleDetails(process);
     return {
@@ -203,6 +219,7 @@ export function makeSnapshot(data: any): RealtimeSnapshot {
       comm: String(process.comm || 'unknown'),
       pid: Number(process.pid),
       cpu: Number(process.cpu ?? 0),
+      metrics: liveProcessMetrics(process),
       attribution_labels: process.attribution_prediction?.available
         ? process.attribution_prediction.labels
         : null,
@@ -260,7 +277,7 @@ export function makeSnapshot(data: any): RealtimeSnapshot {
     prediction,
     metrics: makeMetrics(selected),
     observations,
-    observationCount: Math.max(0, processes.length - 1),
+    observationCount: processes.length,
     events,
     models,
   };

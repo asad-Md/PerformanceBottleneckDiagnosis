@@ -342,10 +342,10 @@ def _parse_raw_btf_schema(raw_btf, map_name):
     }
 
 
-def get_map_metadata(name):
+def get_map_metadata(name, map_path=None):
     if name not in MAPS:
         raise ValueError(f"Unsupported pinned map name: {name!r}")
-    path = get_pin_dir() / MAPS[name]
+    path = Path(map_path) if map_path is not None else get_pin_dir() / MAPS[name]
     bpftool = shutil.which("bpftool") or "/usr/sbin/bpftool"
     result = subprocess.run(
         ["sudo", "-n", bpftool, "-j", "map", "show", "pinned", str(path)],

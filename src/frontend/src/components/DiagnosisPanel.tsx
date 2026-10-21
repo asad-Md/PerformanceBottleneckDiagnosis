@@ -4,6 +4,12 @@ import type {
   RealtimePredictionResult,
   RealtimeSnapshot,
 } from '../types/realtime';
+import {
+  formatProbabilityPercent,
+  highClassProbability,
+  normalizeProbability,
+  predictedClassConfidence,
+} from '../services/processTable';
 
 interface DiagnosisPanelProps {
   prediction: RealtimePredictionResult | null;
@@ -16,6 +22,9 @@ export function DiagnosisPanel({ prediction, metrics, models, connectionStatus }
   const attribution = prediction?.attribution_prediction;
   const severity = prediction?.severity_prediction;
   const isLive = connectionStatus === 'live';
+  const confidence = predictedClassConfidence(severity);
+  const highProbability = highClassProbability(severity);
+  const threshold = normalizeProbability(severity?.threshold);
 
   return (
     <section className="panel diagnosisPanel">
@@ -51,15 +60,19 @@ export function DiagnosisPanel({ prediction, metrics, models, connectionStatus }
           <>
             <div className="detailGrid">
               <div className="detailItem">
-                <span>Severity</span><strong>{severity.prediction}</strong>
+                <span>Classification</span><strong>{severity.prediction === 'Not-High' ? 'Not High' : severity.prediction ?? 'Unavailable'}</strong>
+              </div>
+              <div className="detailItem">
+                <span>Prediction confidence</span>
+                <strong className="selectedConfidence">{formatProbabilityPercent(confidence)}</strong>
               </div>
               <div className="detailItem">
                 <span>High probability</span>
-                <strong>{severity.high_probability === undefined ? '—' : `${(severity.high_probability * 100).toFixed(1)}%`}</strong>
+                <strong>{formatProbabilityPercent(highProbability)}</strong>
               </div>
               <div className="detailItem">
                 <span>Decision threshold</span>
-                <strong>{severity.threshold === undefined ? '—' : `${(severity.threshold * 100).toFixed(1)}%`}</strong>
+                <strong>{formatProbabilityPercent(threshold)}</strong>
               </div>
             </div>
             {severity.zero_filled_inputs?.length ? (
@@ -90,19 +103,20 @@ export function DiagnosisPanel({ prediction, metrics, models, connectionStatus }
             <div className="detailGrid">
               {Object.entries(attribution.probabilities ?? {}).map(([label, probability]) => {
                 const selected = attribution.labels?.includes(label) ?? false;
+                const validProbability = normalizeProbability(probability);
                 return (
                   <div key={label} className="detailItem">
                     <span>{label}{selected ? ' · Selected' : ''}</span>
-                    <strong>{(probability * 100).toFixed(1)}<small>% score</small></strong>
+                    <strong>{formatProbabilityPercent(validProbability)}<small> score</small></strong>
                     <div
                       role="progressbar"
                       aria-label={`${label} sigmoid output score`}
-                      aria-valuenow={probability * 100}
+                      aria-valuenow={validProbability === null ? undefined : validProbability * 100}
                       aria-valuemin={0}
                       aria-valuemax={100}
                       style={{ height: 6, background: '#e5e7eb', borderRadius: 4, marginTop: 8 }}
                     >
-                      <div style={{ width: `${Math.max(0, Math.min(100, probability * 100))}%`, height: '100%', background: '#64748b', borderRadius: 4 }} />
+                      <div style={{ width: validProbability === null ? '0%' : `${validProbability * 100}%`, height: '100%', background: '#64748b', borderRadius: 4 }} />
                     </div>
                   </div>
                 );

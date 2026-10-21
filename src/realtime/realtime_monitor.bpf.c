@@ -15,6 +15,8 @@
 #define MAX_ENTRIES 65536
 #define TASK_COMM_LEN 16
 #define MAX_LOCK_NESTING 4
+#define BPF_ENOENT 2
+#define PF_EXITING 0x00000004
 #define TASK_INTERRUPTIBLE 0x0001
 #define TASK_UNINTERRUPTIBLE 0x0002
 
@@ -101,6 +103,13 @@ struct wakeup_entry {
     __u64 wakeup_ns;
 };
 
+struct map_cleanup_context {
+    __u32 pid;
+    __u32 map_id;
+    __u32 deleted;
+    long error;
+};
+
 #define HASH_MAP(name, value_type)                  \
     struct {                                        \
         __uint(type, BPF_MAP_TYPE_HASH);            \
@@ -151,6 +160,52 @@ struct {
     __type(value, __u64);
 } runq_len SEC(".maps");
 
+static __always_inline int current_task_is_exiting(void)
+{
+    struct task_struct *task = bpf_get_current_task_btf();
+
+    return task && (BPF_CORE_READ(task, flags) & PF_EXITING);
+}
+
+static long delete_pid_map_entry(struct bpf_map *map, const void *key,
+                                 void *value, void *context)
+{
+    struct map_cleanup_context *cleanup = context;
+    const struct agg_key *agg_key = key;
+
+    /* Remove every CPU shard for this exited TID or thread-group ID. */
+    if (agg_key->pid != cleanup->pid)
+        return 0;
+
+    long result = bpf_map_delete_elem(map, key);
+    if (result) {
+        if (result != -BPF_ENOENT && !cleanup->error)
+            cleanup->error = result;
+        return 0;
+    }
+    cleanup->deleted++;
+    return 0;
+}
+
+static __always_inline void cleanup_pid_map(struct bpf_map *map, __u32 pid,
+                                            __u32 map_id)
+{
+    struct map_cleanup_context cleanup = {
+        .pid = pid,
+        .map_id = map_id,
+    };
+    /* Aggregates live only for the observed task lifetime, not as history. */
+    long traversed = bpf_for_each_map_elem(map, delete_pid_map_entry,
+                                           &cleanup, 0);
+
+    if (traversed < 0 || cleanup.error) {
+        long error = cleanup.error ? cleanup.error : traversed;
+
+        bpf_printk("exit cleanup failed map=%u pid=%u error=%ld",
+                   cleanup.map_id, cleanup.pid, error);
+    }
+}
+
 #define GET_OR_CREATE(name, value_type, key_ptr) ({                 \
     struct value_type *value = bpf_map_lookup_elem(&(name), key_ptr); \
     if (!value) {                                                    \
@@ -168,6 +223,7 @@ int handle_switch(struct trace_event_raw_sched_switch *ctx)
     __u32 cpu = bpf_get_smp_processor_id();
     __u32 prev_pid = ctx->prev_pid;
     __u32 next_pid = ctx->next_pid;
+    int prev_exiting = current_task_is_exiting();
 
     /* Preserve the v7 collection definition and its fixed 16-CPU scale. */
     __u32 zero = 0;
@@ -208,7 +264,7 @@ int handle_switch(struct trace_event_raw_sched_switch *ctx)
         bpf_map_update_elem(&oncpu_scratch, &next_pid, &start, BPF_ANY);
     }
 
-    if (prev_pid) {
+    if (prev_pid && !prev_exiting) {
         struct agg_key key = {.pid = prev_pid, .cpu = cpu};
         struct sched_value *value = GET_OR_CREATE(sched_map, sched_value, &key);
         if (value) {
@@ -231,7 +287,11 @@ SEC("tp/sched/sched_migrate_task")
 int handle_migrate(struct trace_event_raw_sched_migrate_task *ctx)
 {
     struct agg_key key = {.pid = ctx->pid, .cpu = ctx->dest_cpu};
-    struct sched_value *value = GET_OR_CREATE(sched_map, sched_value, &key);
+    struct sched_value *value = bpf_map_lookup_elem(&sched_map, &key);
+    if (!value) {
+        key.cpu = ctx->orig_cpu;
+        value = bpf_map_lookup_elem(&sched_map, &key);
+    }
     if (value) {
         value->cpu_migrations++;
         value->last_update_ns = bpf_ktime_get_ns();
@@ -263,6 +323,9 @@ int handle_wakeup_new(struct trace_event_raw_sched_wakeup_template *ctx)
 
 static __always_inline int update_fault(__u64 minor)
 {
+    if (current_task_is_exiting())
+        return 0;
+
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
     struct agg_key key = {.pid = pid, .cpu = bpf_get_smp_processor_id()};
     struct mem_value *value = GET_OR_CREATE(mem_map, mem_value, &key);
@@ -291,6 +354,9 @@ int handle_page_fault_kernel(void *ctx)
 SEC("tp/kmem/kmalloc")
 int handle_kmalloc(struct trace_event_raw_kmalloc *ctx)
 {
+    if (current_task_is_exiting())
+        return 0;
+
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
     struct agg_key key = {.pid = pid, .cpu = bpf_get_smp_processor_id()};
     struct mem_value *value = GET_OR_CREATE(mem_map, mem_value, &key);
@@ -305,6 +371,9 @@ int handle_kmalloc(struct trace_event_raw_kmalloc *ctx)
 SEC("tp/kmem/kfree")
 int handle_kfree(void *ctx)
 {
+    if (current_task_is_exiting())
+        return 0;
+
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
     struct agg_key key = {.pid = pid, .cpu = bpf_get_smp_processor_id()};
     struct mem_value *value = GET_OR_CREATE(mem_map, mem_value, &key);
@@ -347,6 +416,8 @@ HANDLE_SYS_ENTER(poll, SYS_POLL)
     SEC("tp/syscalls/sys_exit_" #name)                                         \
     int exit_##name(struct trace_event_raw_sys_exit *ctx)                      \
     {                                                                          \
+        if (current_task_is_exiting())                                         \
+            return 0;                                                          \
         long syscall_ret = ctx->ret;                                           \
         __u64 pid_tgid = bpf_get_current_pid_tgid();                            \
         __u32 pid = pid_tgid >> 32;                                             \
@@ -409,6 +480,9 @@ HANDLE_SYS_EXIT(poll)
 
 static __always_inline int lock_wait_enter(__u8 kind)
 {
+    if (current_task_is_exiting())
+        return 0;
+
     __u32 tid = (__u32)bpf_get_current_pid_tgid();
     struct lock_key key = {.tid = tid, .kind = kind};
     struct lock_entry *entry = bpf_map_lookup_elem(&lock_scratch, &key);
@@ -448,6 +522,9 @@ static __always_inline int lock_wait_enter(__u8 kind)
 
 static __always_inline int lock_wait_exit(__u8 kind)
 {
+    if (current_task_is_exiting())
+        return 0;
+
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
     __u32 tid = (__u32)pid_tgid;
@@ -525,16 +602,28 @@ HANDLE_LOCK_SLOWPATH(rwsem_down_write_slowpath, LOCK_RWSEM_WRITE)
 SEC("tp/sched/sched_process_exit")
 int handle_exit(struct trace_event_raw_sched_process_template *ctx)
 {
-    __u32 pid = ctx->pid;
-    struct lock_key mutex_key = {.tid = pid, .kind = LOCK_MUTEX};
-    struct lock_key rwsem_read_key = {.tid = pid, .kind = LOCK_RWSEM_READ};
-    struct lock_key rwsem_write_key = {.tid = pid, .kind = LOCK_RWSEM_WRITE};
-    bpf_map_delete_elem(&oncpu_scratch, &pid);
-    bpf_map_delete_elem(&syscall_scratch, &pid);
+    __u32 tid = ctx->pid;
+    struct task_struct *task = bpf_get_current_task_btf();
+    __u32 tgid = task ? BPF_CORE_READ(task, tgid) : tid;
+    struct signal_struct *signal = task ? BPF_CORE_READ(task, signal) : NULL;
+    int group_dead = signal && BPF_CORE_READ(signal, live.counter) == 0;
+    struct lock_key mutex_key = {.tid = tid, .kind = LOCK_MUTEX};
+    struct lock_key rwsem_read_key = {.tid = tid, .kind = LOCK_RWSEM_READ};
+    struct lock_key rwsem_write_key = {.tid = tid, .kind = LOCK_RWSEM_WRITE};
+
+    bpf_map_delete_elem(&oncpu_scratch, &tid);
+    bpf_map_delete_elem(&syscall_scratch, &tid);
     bpf_map_delete_elem(&lock_scratch, &mutex_key);
     bpf_map_delete_elem(&lock_scratch, &rwsem_read_key);
     bpf_map_delete_elem(&lock_scratch, &rwsem_write_key);
-    bpf_map_delete_elem(&wakeup_scratch, &pid);
+    bpf_map_delete_elem(&wakeup_scratch, &tid);
+
+    cleanup_pid_map((struct bpf_map *)&sched_map, tid, 0);
+    if (group_dead) {
+        cleanup_pid_map((struct bpf_map *)&mem_map, tgid, 1);
+        cleanup_pid_map((struct bpf_map *)&syscall_map, tgid, 2);
+        cleanup_pid_map((struct bpf_map *)&lock_map, tgid, 3);
+    }
     return 0;
 }
 

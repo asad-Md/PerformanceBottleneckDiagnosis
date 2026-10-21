@@ -40,7 +40,19 @@ The realtime reader applies the saved binary decision threshold and rejects any 
 
 ## Map snapshot behavior
 
-- The reader dumps all four pinned maps and then deletes the captured hash-map entries. This is not atomic with kernel-side updates; updates racing with deletion can be lost.
-- Map reading launches one `bpftool` dump per map. Missing pins, malformed payloads, and reset failures stop inference explicitly.
+- The `/api/live` dashboard reader is read-only. The collector removes scheduler
+  entries for each exiting TID and removes memory, syscall, and lock entries for
+  a TGID only when its final thread exits. These maps represent active task
+  lifetimes, not retained historical records; completed-process counters are
+  intentionally retired to release hash-map capacity.
+- Exit cleanup scans the relevant hash map only from `sched_process_exit`, not
+  on scheduler events or dashboard refreshes. Cleanup errors are reported with
+  `bpf_printk`; the collector does not silently treat a partial cleanup as
+  complete. The maps have a fixed maximum size, so the exit scan is bounded by
+  that map's entry count.
+- The inference reader uses bpftool dumps only to enumerate candidate keys, validates every map's BTF/ABI, then consumes each current value with libbpf's atomic lookup-and-delete operation. Updates before a key's atomic consume are included; updates after it recreate the key for the next interval. Candidate keys absent because exit cleanup or another consumer already removed them are skipped.
+- Atomic consumption is per key, not one transaction across all four maps. A process can exit between map reads, so an interval may omit its final counters if exit cleanup removes them before that key is consumed. A failure after some keys have been consumed retains those values in the reader process for its next successful interval; a reader-process crash cannot recover its in-memory partial interval.
+- Map reading first dumps all four maps to obtain bounded candidate keys, then validates configured pinned-map IDs and BTF layouts before consumption. It opens each map and rechecks the descriptor ID, hash type, key size, and value size immediately before consuming entries. Missing pins, replaced/incompatible maps, malformed keys, and atomic-operation failures stop inference explicitly.
+- The dashboard reader remains read-only. It can observe a mixed cross-map view while inference consumes keys; this is not an atomic four-map snapshot.
 - The BPF object records only the raw values needed to compute the selected classifier and attribution inputs. Derived ratios and logarithms are computed in userspace to match training.
 - The configured polling interval defaults to five seconds and targets cycle start-to-start cadence. If a cycle takes longer, the next starts immediately.

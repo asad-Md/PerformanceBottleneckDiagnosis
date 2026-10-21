@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -170,6 +171,56 @@ class BackendModelIntegrationTests(unittest.TestCase):
         self.assertIn('getenv("REALTIME_META_FILE")', pinner_source)
         self.assertIn("meta_file = META_FILE;", pinner_source)
         self.assertEqual(pinner_source.count("write_session_metadata(meta_file,"), 2)
+
+    def test_bpf_exit_cleanup_removes_every_cpu_key_from_all_aggregate_maps(self) -> None:
+        bpf_source = (
+            Path(__file__).resolve().parents[1] / "realtime" / "realtime_monitor.bpf.c"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("bpf_for_each_map_elem(map, delete_pid_map_entry", bpf_source)
+        self.assertIn("if (agg_key->pid != cleanup->pid)", bpf_source)
+        callback_source = bpf_source.split("static long delete_pid_map_entry", 1)[1].split(
+            "static __always_inline void cleanup_pid_map", 1
+        )[0]
+        self.assertNotIn("agg_key->cpu", callback_source)
+        self.assertIn("return 0;", callback_source)
+        self.assertIn("cleanup->error = result;", callback_source)
+        self.assertIn("result != -BPF_ENOENT", callback_source)
+        self.assertIn("cleanup->deleted++", callback_source)
+        self.assertIn("cleanup_pid_map((struct bpf_map *)&sched_map, tid, 0);", bpf_source)
+        self.assertIn("if (group_dead)", bpf_source)
+        for map_name, map_id in (("mem_map", 1), ("syscall_map", 2), ("lock_map", 3)):
+            self.assertIn(
+                f"cleanup_pid_map((struct bpf_map *)&{map_name}, tgid, {map_id});",
+                bpf_source,
+            )
+
+        self.assertIn("BPF_CORE_READ(signal, live.counter) == 0", bpf_source)
+        self.assertIn("BPF_CORE_READ(task, flags) & PF_EXITING", bpf_source)
+        self.assertIn("if (prev_pid && !prev_exiting)", bpf_source)
+        migrate_handler = bpf_source.split("int handle_migrate(", 1)[1].split(
+            "static __always_inline int record_wakeup", 1
+        )[0]
+        self.assertIn(".cpu = ctx->dest_cpu", migrate_handler)
+        self.assertIn("key.cpu = ctx->orig_cpu", migrate_handler)
+        self.assertIn("bpf_map_lookup_elem(&sched_map, &key)", migrate_handler)
+        self.assertNotIn("GET_OR_CREATE", migrate_handler)
+        self.assertIn('bpf_printk("exit cleanup failed', bpf_source)
+        self.assertIn("#define MAX_ENTRIES 65536", bpf_source)
+        cleanup_function = bpf_source.split("static __always_inline void cleanup_pid_map", 1)[1].split(
+            "#define GET_OR_CREATE", 1
+        )[0]
+        self.assertIn("if (traversed < 0 || cleanup.error)", cleanup_function)
+        self.assertIn("cleanup.error ? cleanup.error : traversed", cleanup_function)
+
+        exit_handler = bpf_source.split("int handle_exit(", 1)[1]
+        self.assertLess(exit_handler.index("cleanup_pid_map("), exit_handler.index("return 0;"))
+        self.assertNotIn("last_update_ns", callback_source)
+
+        reader_source = Path(live_reader.__file__).read_text(encoding="utf-8")
+        read_function = reader_source.split("def read_live_processes():", 1)[1]
+        self.assertNotIn("bpf_map_delete_elem", read_function)
+        self.assertNotIn("map delete", read_function.lower())
 
     def test_attribution_feature_contract_is_fully_mapped(self) -> None:
         directly_observed = {

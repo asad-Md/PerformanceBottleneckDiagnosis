@@ -9,6 +9,17 @@ const { code } = await transform(source, { loader: 'ts', format: 'esm' });
 const { formatUnavailablePrediction, makeSnapshot } = await import(
   `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`
 );
+const processTableSource = new URL('../src/services/processTable.ts', import.meta.url);
+const processTableText = await readFile(processTableSource, 'utf8');
+const { code: processTableCode } = await transform(processTableText, { loader: 'ts', format: 'esm' });
+const {
+  filterAndSortProcesses,
+  formatProbabilityPercent,
+  highClassProbability,
+  normalizeProbability,
+  predictedClassConfidence,
+  summarizeVisibleProcesses,
+} = await import(`data:text/javascript;base64,${Buffer.from(processTableCode).toString('base64')}`);
 
 const staleSkipReason = 'Map snapshot is stale; no live inference was run.';
 
@@ -29,7 +40,7 @@ function row({ pid, cpu = 0, timestamp, dataStatus, severity, attribution, missi
   };
 }
 
-test('snapshot separates selected diagnosis and summarizes fresh/stale observations', () => {
+test('snapshot retains selected and supplementary rows for the all-process table', () => {
   const selected = row({
     pid: 3,
     timestamp: 900,
@@ -87,10 +98,10 @@ test('snapshot separates selected diagnosis and summarizes fresh/stale observati
   assert.equal(snapshot.prediction.pid, 3);
   assert.equal(snapshot.freshRowCount, 2);
   assert.equal(snapshot.staleRowCount, 1);
-  assert.equal(snapshot.observationCount, 2);
-  assert.deepEqual(snapshot.observations.map((item) => item.pid), [2, 1]);
-  assert.equal(snapshot.observations.some((item) => item.pid === snapshot.prediction.pid), false);
-  assert.equal(snapshot.observations[0].attribution_prediction.error, freshUnavailable.attribution_prediction.error);
+  assert.equal(snapshot.observationCount, 3);
+  assert.deepEqual(snapshot.observations.map((item) => item.pid), [3, 2, 1]);
+  assert.equal(snapshot.observations.some((item) => item.pid === snapshot.prediction.pid), true);
+  assert.equal(snapshot.observations[1].attribution_prediction.error, freshUnavailable.attribution_prediction.error);
 });
 
 test('prediction status preserves stale skip, fresh backend reasons, and inference errors', () => {
@@ -123,5 +134,96 @@ test('supplementary rows with valid monotonic timestamps are sorted newest first
   const newer = row({ pid: 2, timestamp: '90071992547409925', dataStatus: 'live', ...common });
   const snapshot = makeSnapshot({ source_status: 'live', processes: [selected, older, newer], models: {} });
 
-  assert.deepEqual(snapshot.observations.map((item) => item.pid), [2, 1]);
+  assert.deepEqual(snapshot.observations.map((item) => item.pid), [99, 2, 1]);
+});
+
+test('probability formatting validates values and reports percentages to one decimal', () => {
+  assert.equal(normalizeProbability(0.824), 0.824);
+  assert.equal(formatProbabilityPercent(0.824), '82.4%');
+  for (const value of [undefined, null, Number.NaN, Infinity, -Infinity, -0.01, 1.01, '0.5']) {
+    assert.equal(normalizeProbability(value), null);
+    assert.equal(formatProbabilityPercent(value), 'N/A');
+  }
+});
+
+test('predicted-class confidence differs from High-class probability', () => {
+  const notHigh = {
+    available: true,
+    status: 'available',
+    prediction: 'Not-High',
+    confidence: 82,
+    high_probability: 0.18,
+    class_probabilities: { High: 0.18, 'Not-High': 0.82 },
+  };
+  assert.equal(predictedClassConfidence(notHigh), 0.82);
+  assert.equal(highClassProbability(notHigh), 0.18);
+
+  const high = {
+    available: true,
+    status: 'available',
+    prediction: 'High',
+    confidence: 91,
+    high_probability: 0.91,
+    class_probabilities: { High: 0.91, 'Not-High': 0.09 },
+  };
+  assert.equal(predictedClassConfidence(high), 0.91);
+  assert.equal(highClassProbability(high), 0.91);
+});
+
+test('confidence uses backend percentage only when class-specific probabilities are absent', () => {
+  assert.equal(predictedClassConfidence({
+    available: true,
+    status: 'available',
+    prediction: 'Not-High',
+    confidence: 76.5,
+  }), 0.765);
+  assert.equal(predictedClassConfidence({
+    available: true,
+    status: 'available',
+    prediction: 'Not-High',
+    confidence: 101,
+  }), null);
+  assert.equal(predictedClassConfidence({
+    available: true,
+    status: 'available',
+    confidence: 93,
+  }), null);
+  assert.equal(predictedClassConfidence({ available: false, status: 'unavailable', confidence: 93 }), null);
+});
+
+test('process filtering, severity sorting, stale toggle, and counts use visible rows', () => {
+  const process = (pid, comm, { high, predicted = 'High', stale = false, available = true } = {}) => ({
+    pid,
+    cpu: 0,
+    comm,
+    data_status: stale ? 'stale' : 'live',
+    metrics: { runtimeMs: null, contextSwitches: null, cpuMigrations: null, allocationBytes: null, majorFaults: null, minorFaults: null },
+    severity_prediction: available ? {
+      available: true,
+      status: 'available',
+      prediction: predicted,
+      high_probability: high,
+      class_probabilities: { High: high, 'Not-High': high === undefined ? undefined : 1 - high },
+    } : { available: false, status: 'unavailable' },
+    attribution_prediction: null,
+    attribution_labels: null,
+  });
+  const items = [
+    process(20, 'stress-ng', { high: 0.82, predicted: 'Not-High' }),
+    process(10, 'worker', { high: 0.91 }),
+    process(30, 'stress', { high: 0.65, stale: true }),
+    process(40, 'unknown', { available: false }),
+  ];
+  const defaults = { search: '', stressOnly: false, includeStale: true, sort: 'high-probability' };
+  assert.deepEqual(filterAndSortProcesses(items, defaults).map((item) => item.pid), [10, 20, 30, 40]);
+  assert.deepEqual(filterAndSortProcesses(items, { ...defaults, search: 'STRESS' }).map((item) => item.pid), [20, 30]);
+  assert.deepEqual(filterAndSortProcesses(items, { ...defaults, search: '20' }).map((item) => item.pid), [20]);
+  assert.deepEqual(filterAndSortProcesses(items, { ...defaults, stressOnly: true, includeStale: false }).map((item) => item.pid), [20]);
+  assert.deepEqual(filterAndSortProcesses(items, { ...defaults, includeStale: false }).map((item) => item.pid), [10, 20, 40]);
+  assert.deepEqual(summarizeVisibleProcesses(filterAndSortProcesses(items, { ...defaults, includeStale: false })), {
+    visible: 3,
+    high: 1,
+    notHigh: 1,
+    confidenceAvailable: 2,
+  });
 });
