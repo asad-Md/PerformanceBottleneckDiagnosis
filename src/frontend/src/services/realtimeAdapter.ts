@@ -9,7 +9,7 @@ import type {
   SeverityPrediction,
 } from '../types/realtime';
 
-const API_BASE = 'http://127.0.0.1:8000';
+const API_BASE = ((import.meta as ImportMeta & { env?: { VITE_API_BASE_URL?: string } }).env?.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/+$/, '');
 const STALE_INFERENCE_REASON = 'Map snapshot is stale; no live inference was run.';
 let pendingSnapshot: Promise<RealtimeSnapshot> | null = null;
 
