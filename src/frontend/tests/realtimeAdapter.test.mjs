@@ -96,12 +96,56 @@ test('snapshot retains selected and supplementary rows for the all-process table
   });
 
   assert.equal(snapshot.prediction.pid, 3);
+  assert.equal(snapshot.processCount, 2);
   assert.equal(snapshot.freshRowCount, 2);
   assert.equal(snapshot.staleRowCount, 1);
-  assert.equal(snapshot.observationCount, 3);
-  assert.deepEqual(snapshot.observations.map((item) => item.pid), [3, 2, 1]);
+  assert.equal(snapshot.observationCount, 2);
+  assert.deepEqual(snapshot.observations.map((item) => item.pid), [3, 2]);
   assert.equal(snapshot.observations.some((item) => item.pid === snapshot.prediction.pid), true);
   assert.equal(snapshot.observations[1].attribution_prediction.error, freshUnavailable.attribution_prediction.error);
+});
+
+test('snapshot does not select or expose stale rows when no fresh process remains', () => {
+  const stale = row({
+    pid: 7,
+    timestamp: 800,
+    dataStatus: 'stale',
+    severity: { available: false, status: 'unavailable', error: staleSkipReason },
+    attribution: { available: false, status: 'unavailable', model: 'mlp', labels: null, probabilities: null, threshold: null, error: staleSkipReason },
+  });
+  const snapshot = makeSnapshot({ source_status: 'stale', processes: [stale], models: {} });
+
+  assert.equal(snapshot.prediction, null);
+  assert.equal(snapshot.connectionStatus, 'stale');
+  assert.equal(snapshot.processCount, 0);
+  assert.equal(snapshot.freshRowCount, 0);
+  assert.equal(snapshot.staleRowCount, 1);
+  assert.equal(snapshot.observationCount, 0);
+  assert.deepEqual(snapshot.observations, []);
+});
+
+test('snapshot keeps every fresh row visible even when the input contains more than fifty rows', () => {
+  const available = {
+    severity: { available: true, status: 'available', prediction: 'Not-High' },
+    attribution: { available: true, status: 'available', model: 'mlp', labels: [], probabilities: {}, threshold: 0.5 },
+  };
+  const processes = Array.from({ length: 55 }, (_, index) => row({
+    pid: index + 1,
+    timestamp: 1000 + index,
+    dataStatus: index === 54 ? 'stale' : 'live',
+    ...available,
+  }));
+  const snapshot = makeSnapshot({ source_status: 'live', processes, models: {} });
+  const visible = filterAndSortProcesses(snapshot.observations, {
+    search: '',
+    stressOnly: false,
+    sort: 'pid',
+  });
+
+  assert.equal(snapshot.freshRowCount, 54);
+  assert.equal(snapshot.observations.length, 54);
+  assert.equal(visible.length, 54);
+  assert.equal(visible.some((item) => item.data_status === 'stale'), false);
 });
 
 test('prediction status preserves stale skip, fresh backend reasons, and inference errors', () => {
@@ -191,7 +235,7 @@ test('confidence uses backend percentage only when class-specific probabilities 
   assert.equal(predictedClassConfidence({ available: false, status: 'unavailable', confidence: 93 }), null);
 });
 
-test('process filtering, severity sorting, stale toggle, and counts use visible rows', () => {
+test('process filtering, severity sorting, and counts exclude stale rows', () => {
   const process = (pid, comm, { high, predicted = 'High', stale = false, available = true } = {}) => ({
     pid,
     cpu: 0,
@@ -214,13 +258,12 @@ test('process filtering, severity sorting, stale toggle, and counts use visible 
     process(30, 'stress', { high: 0.65, stale: true }),
     process(40, 'unknown', { available: false }),
   ];
-  const defaults = { search: '', stressOnly: false, includeStale: true, sort: 'high-probability' };
-  assert.deepEqual(filterAndSortProcesses(items, defaults).map((item) => item.pid), [10, 20, 30, 40]);
-  assert.deepEqual(filterAndSortProcesses(items, { ...defaults, search: 'STRESS' }).map((item) => item.pid), [20, 30]);
+  const defaults = { search: '', stressOnly: false, sort: 'high-probability' };
+  assert.deepEqual(filterAndSortProcesses(items, defaults).map((item) => item.pid), [10, 20, 40]);
+  assert.deepEqual(filterAndSortProcesses(items, { ...defaults, search: 'STRESS' }).map((item) => item.pid), [20]);
   assert.deepEqual(filterAndSortProcesses(items, { ...defaults, search: '20' }).map((item) => item.pid), [20]);
-  assert.deepEqual(filterAndSortProcesses(items, { ...defaults, stressOnly: true, includeStale: false }).map((item) => item.pid), [20]);
-  assert.deepEqual(filterAndSortProcesses(items, { ...defaults, includeStale: false }).map((item) => item.pid), [10, 20, 40]);
-  assert.deepEqual(summarizeVisibleProcesses(filterAndSortProcesses(items, { ...defaults, includeStale: false })), {
+  assert.deepEqual(filterAndSortProcesses(items, { ...defaults, stressOnly: true }).map((item) => item.pid), [20]);
+  assert.deepEqual(summarizeVisibleProcesses(filterAndSortProcesses(items, defaults)), {
     visible: 3,
     high: 1,
     notHigh: 1,

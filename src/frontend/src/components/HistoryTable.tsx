@@ -24,9 +24,8 @@ function formatMetric(value: number | null, unit = ''): string {
 export function HistoryTable({ items, totalCount }: HistoryTableProps) {
   const [search, setSearch] = useState('');
   const [stressOnly, setStressOnly] = useState(false);
-  const [includeStale, setIncludeStale] = useState(true);
   const [sort, setSort] = useState<ProcessSort>('high-probability');
-  const visible = filterAndSortProcesses(items, { search, stressOnly, includeStale, sort });
+  const visible = filterAndSortProcesses(items, { search, stressOnly, sort });
   const summary = summarizeVisibleProcesses(visible);
 
   return (
@@ -63,10 +62,6 @@ export function HistoryTable({ items, totalCount }: HistoryTableProps) {
           <input type="checkbox" checked={stressOnly} onChange={(event) => setStressOnly(event.target.checked)} />
           <span>Stress-test processes</span>
         </label>
-        <label className="toggleField">
-          <input type="checkbox" checked={includeStale} onChange={(event) => setIncludeStale(event.target.checked)} />
-          <span>Show stale rows</span>
-        </label>
       </div>
 
       <div className="processSummary" aria-live="polite">
@@ -80,7 +75,7 @@ export function HistoryTable({ items, totalCount }: HistoryTableProps) {
       {visible.length === 0 ? (
         <p className="emptyProcessState">
           {items.length === 0
-            ? 'No process rows are present in the current map snapshot.'
+            ? 'No fresh process rows are available in the current map snapshot.'
             : 'No process rows match the current search and filters.'}
         </p>
       ) : (
@@ -93,7 +88,7 @@ export function HistoryTable({ items, totalCount }: HistoryTableProps) {
                 <th>CPU</th>
                 <th>Data</th>
                 <th>Champion V7</th>
-                <th>Prediction confidence</th>
+                <th>Confidence</th>
                 <th>High probability</th>
                 <th>Runtime</th>
                 <th>Context switches</th>
@@ -112,7 +107,7 @@ export function HistoryTable({ items, totalCount }: HistoryTableProps) {
                   ? prediction.prediction === 'Not-High' ? 'Not High' : prediction.prediction ?? 'Unavailable'
                   : formatUnavailablePrediction(prediction, item.data_status);
                 return (
-                  <tr key={`${item.pid}-${item.cpu}`} className={item.data_status === 'stale' ? 'staleProcessRow' : undefined}>
+                  <tr key={`${item.pid}-${item.cpu}`}>
                     <td className="processNameCell">{item.comm || 'Unknown process'}</td>
                     <td>{item.pid}</td>
                     <td>{item.cpu}</td>
@@ -126,19 +121,7 @@ export function HistoryTable({ items, totalCount }: HistoryTableProps) {
                       {confidence === null ? (
                         <span className="unavailableValue">N/A</span>
                       ) : (
-                        <div className="confidenceValue">
-                          <strong>{formatProbabilityPercent(confidence)}</strong>
-                          <div
-                            className="confidenceTrack"
-                            role="progressbar"
-                            aria-label={`PID ${item.pid} ${item.comm || 'unknown process'} predicted-class confidence`}
-                            aria-valuenow={confidence * 100}
-                            aria-valuemin={0}
-                            aria-valuemax={100}
-                          >
-                            <span style={{ width: `${confidence * 100}%` }} />
-                          </div>
-                        </div>
+                        <span className="confidenceValue">{formatProbabilityPercent(confidence)}</span>
                       )}
                     </td>
                     <td>{formatProbabilityPercent(highProbability)}</td>

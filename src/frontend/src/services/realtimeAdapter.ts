@@ -149,14 +149,15 @@ export function makeSnapshot(data: any): RealtimeSnapshot {
   };
   const freshRowCount = processes.filter(isFresh).length;
   const staleRowCount = processes.length - freshRowCount;
-  const selected = processes.find((process: any) =>
+  const freshProcesses = processes.filter(isFresh);
+  const selected = freshProcesses.find((process: any) =>
     isFresh(process)
       && process.severity_prediction?.available
       && process.attribution_prediction?.available,
-  ) ?? processes.find((process: any) =>
+  ) ?? freshProcesses.find((process: any) =>
     isFresh(process)
       && (process.severity_prediction?.available || process.attribution_prediction?.available),
-  ) ?? processes.find(isFresh) ?? processes[0];
+  ) ?? freshProcesses[0];
 
   if (!selected) {
     return {
@@ -166,16 +167,18 @@ export function makeSnapshot(data: any): RealtimeSnapshot {
       sampleTimestampClock: 'CLOCK_MONOTONIC',
       sampleTimestampStatus: 'unavailable',
       sampleAgeSeconds: null,
-      connectionStatus: 'live',
-      statusLabel: 'LIVE eBPF — NO PROCESSES',
-      summary: data.source_error ?? 'The live API responded, but the eBPF maps returned no process metrics.',
-      processCount: 0,
+      connectionStatus: staleRowCount > 0 ? 'stale' : 'live',
+      statusLabel: staleRowCount > 0 ? 'STALE eBPF' : 'LIVE eBPF — NO PROCESSES',
+      summary: staleRowCount > 0
+        ? `No fresh eBPF process rows are available. ${staleRowCount} stale rows are excluded from diagnosis and the process table.`
+        : data.source_error ?? 'The live API responded, but the eBPF maps returned no process metrics.',
+      processCount: freshRowCount,
       freshRowCount,
       staleRowCount,
       prediction: null,
       metrics: [],
       observations: [],
-      observationCount: 0,
+      observationCount: freshRowCount,
       events: [],
       models,
     };
@@ -193,7 +196,7 @@ export function makeSnapshot(data: any): RealtimeSnapshot {
     missing_metrics: selected.missing_metrics ?? [],
   };
 
-  const observationProcesses = [...processes]
+  const observationProcesses = [...freshProcesses]
     .sort((left: any, right: any) => {
       const leftTimestamp = sampleDetails(left).timestampNs;
       const rightTimestamp = sampleDetails(right).timestampNs;
@@ -205,8 +208,7 @@ export function makeSnapshot(data: any): RealtimeSnapshot {
       if (leftTimestamp) return -1;
       if (rightTimestamp) return 1;
       return 0;
-    })
-    .slice(0, 50);
+    });
 
   const observations: RealtimeObservation[] = observationProcesses.map((process: any) => {
     const processSample = sampleDetails(process);
@@ -215,7 +217,7 @@ export function makeSnapshot(data: any): RealtimeSnapshot {
       sample_timestamp_clock: 'CLOCK_MONOTONIC',
       sample_timestamp_status: processSample.timestampStatus,
       sample_age_seconds: processSample.ageSeconds,
-      data_status: isFresh(process) ? 'live' : 'stale',
+      data_status: 'live',
       comm: String(process.comm || 'unknown'),
       pid: Number(process.pid),
       cpu: Number(process.cpu ?? 0),
@@ -268,16 +270,16 @@ export function makeSnapshot(data: any): RealtimeSnapshot {
     sampleTimestampClock: 'CLOCK_MONOTONIC',
     sampleTimestampStatus: sample.timestampStatus,
     sampleAgeSeconds: sample.ageSeconds,
-    connectionStatus: !isFresh(selected) ? 'stale' : 'live',
-    statusLabel: !isFresh(selected) ? 'STALE eBPF' : 'LIVE eBPF',
-    summary: `${!isFresh(selected) ? 'Stale' : 'Live'} eBPF data for ${processes.length} PID/CPU rows. Showing PID ${selected.pid} CPU ${selected.cpu} (${selected.comm}); counters are accumulated observations, not instantaneous rates. ${attributionNote}`,
-    processCount: processes.length,
+    connectionStatus: 'live',
+    statusLabel: 'LIVE eBPF',
+    summary: `Live eBPF data for ${freshRowCount} fresh PID/CPU rows${staleRowCount ? `; ${staleRowCount} stale rows are excluded` : ''}. Showing PID ${selected.pid} CPU ${selected.cpu} (${selected.comm}); counters are accumulated observations, not instantaneous rates. ${attributionNote}`,
+    processCount: freshRowCount,
     freshRowCount,
     staleRowCount,
     prediction,
     metrics: makeMetrics(selected),
     observations,
-    observationCount: processes.length,
+    observationCount: freshRowCount,
     events,
     models,
   };

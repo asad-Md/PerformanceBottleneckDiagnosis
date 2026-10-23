@@ -61,11 +61,11 @@ function validClassification(process: RealtimeObservation): SeverityLabel | null
 
 export function filterAndSortProcesses(
   items: RealtimeObservation[],
-  options: { search: string; stressOnly: boolean; includeStale: boolean; sort: ProcessSort },
+  options: { search: string; stressOnly: boolean; sort: ProcessSort },
 ): RealtimeObservation[] {
   const query = options.search.trim().toLocaleLowerCase();
   return items
-    .filter((item) => options.includeStale || item.data_status !== 'stale')
+    .filter((item) => item.data_status === 'live')
     .filter((item) => !options.stressOnly || isStressTestProcess(item))
     .filter((item) => {
       if (!query) return true;

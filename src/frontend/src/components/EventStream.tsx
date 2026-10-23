@@ -14,14 +14,18 @@ export function EventStream({ events }: EventStreamProps) {
         </div>
       </div>
 
-      <div className="eventList">
-        {events.map((event) => (
-          <div key={`${event.time}-${event.text}`} className={`eventItem ${event.level}`}>
-            <span className="eventTime">{event.time}</span>
-            <span className="eventText">{event.text}</span>
-          </div>
-        ))}
-      </div>
+      {events.length ? (
+        <div className="eventList">
+          {events.map((event) => (
+            <div key={`${event.time}-${event.text}`} className={`eventItem ${event.level}`}>
+              <span className="eventTime">{event.time}</span>
+              <span className="eventText">{event.text}</span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="emptyEventState">No events were returned for this snapshot.</p>
+      )}
     </section>
   );
 }

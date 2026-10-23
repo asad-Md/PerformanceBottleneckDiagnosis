@@ -109,14 +109,14 @@ export function DiagnosisPanel({ prediction, metrics, models, connectionStatus }
                     <span>{label}{selected ? ' · Selected' : ''}</span>
                     <strong>{formatProbabilityPercent(validProbability)}<small> score</small></strong>
                     <div
+                      className="scoreTrack"
                       role="progressbar"
                       aria-label={`${label} sigmoid output score`}
                       aria-valuenow={validProbability === null ? undefined : validProbability * 100}
                       aria-valuemin={0}
                       aria-valuemax={100}
-                      style={{ height: 6, background: '#e5e7eb', borderRadius: 4, marginTop: 8 }}
                     >
-                      <div style={{ width: validProbability === null ? '0%' : `${validProbability * 100}%`, height: '100%', background: '#64748b', borderRadius: 4 }} />
+                      <div style={{ width: validProbability === null ? '0%' : `${validProbability * 100}%`, height: '100%' }} />
                     </div>
                   </div>
                 );
