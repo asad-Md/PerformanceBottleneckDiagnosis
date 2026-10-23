@@ -99,3 +99,12 @@ desktop.ini
 
 #reproducible artifacts
 src/attributionAnalysis/attribution_dataset.csv
+# Ignore all pickle files everywhere in the repository
+# Ignore all pickle files in any directory
+**/*.pkl
+
+# Allow the severity classifier model
+!src/approach3/champion_model_v7.pkl
+
+# Allow the attribution feature scaler
+!src/attributionAnalysis/pipeline_comparison_artifacts/feature_scaler.pkl   
