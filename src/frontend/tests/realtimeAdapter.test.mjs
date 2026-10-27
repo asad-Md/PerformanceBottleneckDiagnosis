@@ -6,7 +6,7 @@ import { transform } from 'esbuild';
 const adapterSource = new URL('../src/services/realtimeAdapter.ts', import.meta.url);
 const source = await readFile(adapterSource, 'utf8');
 const { code } = await transform(source, { loader: 'ts', format: 'esm' });
-const { formatUnavailablePrediction, makeSnapshot } = await import(
+const { formatUnavailablePrediction, LIVE_API_URL, makeSnapshot } = await import(
   `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`
 );
 const processTableSource = new URL('../src/services/processTable.ts', import.meta.url);
@@ -22,6 +22,10 @@ const {
 } = await import(`data:text/javascript;base64,${Buffer.from(processTableCode).toString('base64')}`);
 
 const staleSkipReason = 'Map snapshot is stale; no live inference was run.';
+
+test('live API uses a same-origin path by default', () => {
+  assert.equal(LIVE_API_URL, '/api/live');
+});
 
 function row({ pid, cpu = 0, timestamp, dataStatus, severity, attribution, missing = [] }) {
   return {

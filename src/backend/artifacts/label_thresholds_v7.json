@@ -1,0 +1,4 @@
+{
+  "high_threshold_ns": 1500000,
+  "decision_probability_threshold": 0.5
+}

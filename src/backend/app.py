@@ -1,7 +1,6 @@
 import json
 import logging
 from pathlib import Path
-import sys
 
 import joblib
 import numpy as np
@@ -9,6 +8,7 @@ import pandas as pd
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 try:
@@ -16,22 +16,20 @@ try:
 except ImportError:
     from live_reader import ATTRIBUTION_FEATURES, read_live_processes
 
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+from ..realtime.realtime_reader import engineer_features_v5
+from ..realtime.attribution_model import BottleneckAttributor
+from ..realtime.config import RealtimeConfig
 
-from src.realtime.realtime_reader import engineer_features_v5
-from src.realtime.attribution_model import BottleneckAttributor
-from src.realtime.config import RealtimeConfig
-
-CHAMPION_MODEL_PATH = ROOT / "src" / "approach3" / "champion_model_v7.pkl"
-CHAMPION_FEATURES_PATH = ROOT / "src" / "approach3" / "feature_cols_v7.json"
-CHAMPION_THRESHOLDS_PATH = ROOT / "src" / "approach3" / "label_thresholds_v7.json"
-ATTRIBUTION_DIR = ROOT / "src" / "attributionAnalysis" / "pipeline_comparison_artifacts"
-ATTRIBUTION_MODEL_PATH = ATTRIBUTION_DIR / "baseline_original_best.pt"
-ATTRIBUTION_SCALER_PATH = ATTRIBUTION_DIR / "feature_scaler.pkl"
-ATTRIBUTION_FEATURES_PATH = ATTRIBUTION_DIR / "attribution_feature_cols.json"
-ATTRIBUTION_TARGETS_PATH = ATTRIBUTION_DIR / "attribution_target_cols.json"
+BACKEND_DIR = Path(__file__).resolve().parent
+ARTIFACTS_DIR = BACKEND_DIR / "artifacts"
+FRONTEND_STATIC_DIR = BACKEND_DIR / "static"
+CHAMPION_MODEL_PATH = ARTIFACTS_DIR / "champion_model_v7.pkl"
+CHAMPION_FEATURES_PATH = ARTIFACTS_DIR / "feature_cols_v7.json"
+CHAMPION_THRESHOLDS_PATH = ARTIFACTS_DIR / "label_thresholds_v7.json"
+ATTRIBUTION_MODEL_PATH = ARTIFACTS_DIR / "baseline_original_best.pt"
+ATTRIBUTION_SCALER_PATH = ARTIFACTS_DIR / "feature_scaler.pkl"
+ATTRIBUTION_FEATURES_PATH = ARTIFACTS_DIR / "attribution_feature_cols.json"
+ATTRIBUTION_TARGETS_PATH = ARTIFACTS_DIR / "attribution_target_cols.json"
 ATTRIBUTION_THRESHOLD = 0.5
 
 CHAMPION_FEATURES_REQUIRED = [
@@ -584,3 +582,11 @@ def _live_payload() -> dict:
             status_code=503,
             detail=f"Unable to read live eBPF metrics: {exc}",
         ) from exc
+
+
+if FRONTEND_STATIC_DIR.is_dir():
+    app.mount(
+        "/",
+        StaticFiles(directory=FRONTEND_STATIC_DIR, html=True),
+        name="frontend",
+    )

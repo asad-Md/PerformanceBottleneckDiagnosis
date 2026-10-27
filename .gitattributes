@@ -1,1 +1,2 @@
 src/approach3/champion_model_v7.pkl filter=lfs diff=lfs merge=lfs -text
+src/backend/artifacts/champion_model_v7.pkl filter=lfs diff=lfs merge=lfs -text

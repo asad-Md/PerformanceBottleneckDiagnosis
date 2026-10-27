@@ -107,4 +107,8 @@ src/attributionAnalysis/attribution_dataset.csv
 !src/approach3/champion_model_v7.pkl
 
 # Allow the attribution feature scaler
-!src/attributionAnalysis/pipeline_comparison_artifacts/feature_scaler.pkl   
+!src/attributionAnalysis/pipeline_comparison_artifacts/feature_scaler.pkl
+
+# Backend runtime model artifacts
+!src/backend/artifacts/champion_model_v7.pkl
+!src/backend/artifacts/feature_scaler.pkl

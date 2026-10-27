@@ -1021,6 +1021,10 @@ class BackendModelIntegrationTests(unittest.TestCase):
         self.assertEqual(backend.attributor.feature_columns, attribution_columns)
 
     def test_current_artifact_bundle_loads(self) -> None:
+        expected_artifacts_dir = Path(backend.__file__).resolve().parent / "artifacts"
+        self.assertEqual(backend.ARTIFACTS_DIR, expected_artifacts_dir)
+        self.assertTrue((expected_artifacts_dir / "realtime_pinner").is_file())
+        self.assertTrue((expected_artifacts_dir / "realtime_monitor.bpf.o").is_file())
         self.assertEqual(len(backend.CHAMPION_FEATURE_COLS), 33)
         self.assertEqual(
             list(backend.champion_model.feature_names_in_),

@@ -1,7 +1,6 @@
 # Realtime Bottleneck Diagnosis Dashboard
 
-The React dashboard polls the live eBPF API at
-`http://127.0.0.1:8000/api/live`. It displays the selected `(pid, cpu)` row,
+The React dashboard polls `/api/live` on the same origin by default. It displays the selected `(pid, cpu)` row,
 Champion V7 severity, MLP attribution, observed metrics, and sample freshness.
 API failures are shown as a disconnected state; the adapter does not substitute
 mock predictions.
@@ -31,9 +30,9 @@ npm run dev
 
 `npm ci` is only needed if frontend dependencies have not been installed yet.
 Open <http://127.0.0.1:4173/>. The Vite development server listens on port
-4173; the backend must be available on port 8000. The dashboard polls every
-five seconds and allows up to 60 seconds for a live map snapshot. Stale rows
-and unavailable model predictions remain explicitly marked.
+4173; Vite proxies `/api` requests to the backend on port 8000. The dashboard
+polls every five seconds and allows up to 60 seconds for a live map snapshot.
+Stale rows and unavailable model predictions remain explicitly marked.
 
 The live reader depends on Linux eBPF maps pinned under `/sys/fs/bpf` and
 `bpftool`; a native Windows backend may start but cannot provide those live
@@ -57,10 +56,11 @@ When using WSL2, confirm Windows can reach the backend at
 
 ## Classroom demo: deployed frontend and local backend
 
-The frontend request is hardcoded to `http://127.0.0.1:8000/api/live`. In a
-browser, `127.0.0.1` means the computer running that browser, not Vercel's
-servers. This demo therefore requires opening the deployed site on the same
-laptop where the backend is running. The backend's existing CORS middleware
+For a separately deployed frontend, set `VITE_API_BASE_URL` to the backend
+origin when building (for example, `http://127.0.0.1:8000` for this local
+demo). In a browser, `127.0.0.1` means the computer running that browser, not
+Vercel's servers. This demo therefore requires opening the deployed site on the
+same laptop where the backend is running. The backend's existing CORS middleware
 allows `https://performance-bottleneck-diagnosis-kappa.vercel.app`; edit the
 `allow_origins` list in `src/backend/app.py` if the deployed frontend origin
 changes. CORS credentials are disabled because the frontend does not use
