@@ -35,6 +35,11 @@ sudo ./src/realtime/realtime_pinner
 cd /path/to/project
 docker build -t performance-bottleneck-dashboard .
 
+# Export the image to deployment/ so it can be loaded on another Docker host.
+mkdir -p deployment
+docker save --output deployment/performance-bottleneck-dashboard.tar \
+  performance-bottleneck-dashboard
+
 # Run the dashboard with the host's writable bpffs mount.
 # SYS_ADMIN is needed on hosts where CAP_BPF alone cannot read map BTF.
 docker run --rm \
