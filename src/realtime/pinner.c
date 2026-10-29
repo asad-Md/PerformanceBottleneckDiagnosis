@@ -4,13 +4,14 @@
  * Build from src/realtime:
  *   gcc -O2 -Wall -Wextra -o realtime_pinner pinner.c -lbpf -lelf -lz
  *
- * Run from src/realtime (as root):
- *   sudo ./realtime_pinner --obj ./realtime_monitor.bpf.o
+ * Run from any directory (as root); keep the object beside the executable:
+ *   sudo /path/to/src/realtime/realtime_pinner
  */
 #define _GNU_SOURCE
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <errno.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -37,6 +38,42 @@ static uint64_t monotonic_ns(void)
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
         return 0;
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static int find_default_object_path(char *path, size_t path_size)
+{
+    char executable_path[PATH_MAX];
+    ssize_t length = readlink("/proc/self/exe", executable_path,
+                              sizeof(executable_path) - 1);
+    if (length < 0) {
+        fprintf(stderr, "[realtime-pinner] cannot resolve executable path: %s\n",
+                strerror(errno));
+        return -1;
+    }
+    if ((size_t)length >= sizeof(executable_path) - 1) {
+        fprintf(stderr, "[realtime-pinner] executable path is too long\n");
+        return -1;
+    }
+    executable_path[length] = '\0';
+
+    char *separator = strrchr(executable_path, '/');
+    if (!separator) {
+        fprintf(stderr, "[realtime-pinner] resolved executable path is invalid\n");
+        return -1;
+    }
+    if (separator == executable_path)
+        separator[1] = '\0';
+    else
+        *separator = '\0';
+
+    const char *separator_suffix = separator == executable_path ? "" : "/";
+    int written = snprintf(path, path_size, "%s%s%s", executable_path,
+                           separator_suffix, "realtime_monitor.bpf.o");
+    if (written < 0 || (size_t)written >= path_size) {
+        fprintf(stderr, "[realtime-pinner] default BPF object path is too long\n");
+        return -1;
+    }
+    return 0;
 }
 
 static int remove_stale_pins(const char *pin_base)
@@ -86,8 +123,9 @@ int main(int argc, char **argv)
     const char *object_path = getenv("REALTIME_BPF_OBJECT_PATH");
     const char *pin_base = getenv("REALTIME_PIN_BASE");
     const char *meta_file = getenv("REALTIME_META_FILE");
-    if (!object_path || !object_path[0])
-        object_path = "./realtime_monitor.bpf.o";
+    char default_object_path[PATH_MAX];
+    if (object_path && !object_path[0])
+        object_path = NULL;
     if (!pin_base || !pin_base[0])
         pin_base = PIN_BASE;
     if (!meta_file || !meta_file[0])
@@ -99,6 +137,12 @@ int main(int argc, char **argv)
             fprintf(stderr, "Usage: %s [--obj realtime_monitor.bpf.o]\n", argv[0]);
             return 2;
         }
+    }
+    if (!object_path) {
+        if (find_default_object_path(default_object_path,
+                                     sizeof(default_object_path)) != 0)
+            return 1;
+        object_path = default_object_path;
     }
 
     signal(SIGINT, on_signal);

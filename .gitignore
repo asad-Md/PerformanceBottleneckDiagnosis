@@ -112,3 +112,5 @@ src/attributionAnalysis/attribution_dataset.csv
 # Backend runtime model artifacts
 !src/backend/artifacts/champion_model_v7.pkl
 !src/backend/artifacts/feature_scaler.pkl
+
+deployment/performance-bottleneck-dashboard.tar

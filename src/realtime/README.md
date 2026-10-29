@@ -14,13 +14,20 @@ clang -O2 -g -target bpf -D__TARGET_ARCH_x86 \
 gcc -O2 -Wall -Wextra -o realtime_pinner pinner.c -lbpf -lelf -lz
 ```
 
-Use the matching `__TARGET_ARCH_*` define for a non-x86 host. Start a fresh collection session as root:
+Use the matching `__TARGET_ARCH_*` define for a non-x86 host. Keep
+`realtime_pinner` beside `realtime_monitor.bpf.o`; when no object override is
+provided, the pinner resolves the object relative to its executable, not the
+current working directory. Start a fresh collection session as root from any
+directory:
 
 ```bash
-sudo ./realtime_pinner --obj ./realtime_monitor.bpf.o
+sudo /path/to/PerformanceBottleneckDiagnosis/src/realtime/realtime_pinner
 ```
 
-Stop any previous collector first. The pinner replaces stale pins under `/sys/fs/bpf`, loads the specified object, attaches every required probe, and exits with an error rather than leaving a partial collector attached. It leaves the four maps pinned when stopped with Ctrl+C.
+Stop any previous collector first. The pinner replaces stale pins under
+`/sys/fs/bpf/pbd_test`, loads the specified object, attaches every required
+probe, and exits with an error rather than leaving a partial collector
+attached. It leaves the four maps pinned when stopped with Ctrl+C.
 
 In a second terminal, run diagnosis from the repository root with the project environment:
 
